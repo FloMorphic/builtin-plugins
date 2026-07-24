@@ -1,4 +1,6 @@
-# PluginStore
+# Builtin Nodes
+
+Flowmorphic builtin node plugins (repo: [`FloMorphic/builtin-plugins`](https://github.com/FloMorphic/builtin-plugins)).
 
 Inflow plugin nodes, each an independent Go module that imports the
 [`go-plugin-sdk`](https://github.com/Inflowenger/go-plugin-sdk). Every plugin is a
