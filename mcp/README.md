@@ -57,14 +57,19 @@ Shared by every entry point:
 ### `run` body
 
 The LLM node's run body plus a `connection`. `functions` binds specific tools by
-name; an empty list binds every tool the server advertises.
+name; an empty list binds every tool the server advertises. Like the LLM node,
+`messages` is the INIT prompt template — it seeds the agentic loop's conversation
+on the first run only; once the node's scope carries a conversation, the template
+is ignored and the persisted exchange is reused.
 
 ```jsonc
 {
   "settings": { "provider": "openrouter", "model": "anthropic/claude-3.5-sonnet", "access_token": "…" },
   "connection": { "url": "https://…/mcp" },
-  "prompt": "…",
-  "system_prompt": "…",
+  "messages": [
+    { "role": "system", "content": "…" },
+    { "role": "user",   "content": "…" }
+  ],
   "functions": [ { "name": "search" } ]
 }
 ```

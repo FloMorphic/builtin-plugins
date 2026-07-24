@@ -42,33 +42,33 @@ func runHandler(job sdkv1.Job) {
 	messages := scope.Messages
 	resumed := len(messages) > 0 // messages present & non-empty ⇒ not the first run
 
-	// 2. Resolve {{$...}} vars in the system prompt and seat it at index 0 with
-	//    the canonical "system" role. ALWAYS replace messages[0]: the system
-	//    prompt embeds live context values, and in a loop those change every
-	//    iteration — a system message carried over from a prior run is stale, so
-	//    we never keep it.
-	systemMsg := ChatMessage{
-		Role:    "system",
-		Content: resolveVars(job, req.Body.SystemPrompt),
-	}
-	if resumed {
-		messages[0] = systemMsg // overwrite the (now-stale) system message in place
-	} else {
-		messages = []ChatMessage{systemMsg} // seed a fresh conversation
+	// 2. Seed the INIT messages on the first run only. body.Messages is the prompt
+	//    template the drawer collects — a system message (index 0) and/or a user
+	//    message (index 1). Each content may embed {{$...}} vars resolved against
+	//    the live flow context, and empty content is not seated. Once a
+	//    conversation exists (resumed run) the template is skipped entirely: the
+	//    init messages are seeded once and never re-added, so a looping flow does
+	//    not stack them again every pass.
+	if !resumed {
+		messages = seedMessages(job, req.Body.Messages)
 	}
 
-	// 3. Resolve vars in this turn's user prompt and append it.
-	messages = append(messages, ChatMessage{
-		Role:    "user",
-		Content: resolveVars(job, req.Body.Prompt),
-	})
+	// A conversation with no message the provider can send as the request turn is
+	// unanswerable — and some providers (notably Gemini/googleai) index the last
+	// non-system message and panic on an empty history rather than erroring. Guard
+	// here: the prompt template producing no content (or a system-only prompt with
+	// the user box left blank) is a config mistake, not a crash.
+	if !hasSendableTurn(messages) {
+		job.DoneWithError("no message to send: the prompt template resolved to no user/assistant content (a system-only or empty prompt)")
+		return
+	}
 
 	job.Progress(20, sdkv1.Frame{
 		Title:   "run",
 		Content: fmt.Sprintf("calling %s (%d messages)", cfg.Model, len(messages)),
 	})
 
-	// 4. Stream the completion (progress emitted per token inside streamChat). The
+	// 3. Stream the completion (progress emitted per token inside streamChat). The
 	//    result is either plain text or a tool-call message type — or both.
 	result, err := streamChat(job, cfg, messages, req.Body.Functions)
 	if err != nil {
@@ -76,19 +76,21 @@ func runHandler(job sdkv1.Job) {
 		return
 	}
 
-	// 5. Append the assistant turn (text and/or the tool calls it asked for) and
-	//    commit the conversation to this node's scope. CmdSetOnPath's payload is a
-	//    map, so the array is carried under the `messages` key; the empty (no-`$`)
-	//    path means "relative to the current scope", so this lands as
-	//    <current>.messages = [...].
+	// 4. Append the assistant turn (text and/or the tool calls it asked for). The
+	//    conversation is persisted by carrying the full `messages` array in the Done
+	//    payload below: Done commits its data onto this node's scope (node.key), so
+	//    whatever `messages` value it reports IS what the next run reads back via
+	//    CmdGetCurrentScope. That is exactly why a summary such as len(messages) must
+	//    never be reported under the `messages` key — it would overwrite the
+	//    persisted conversation with a bare count and break resumption. A separate
+	//    CmdSetOnPath here would be clobbered by that same Done commit, so we don't.
 	messages = append(messages, ChatMessage{
 		Role:      "assistant",
 		Content:   result.Content,
 		ToolCalls: result.ToolCalls,
 	})
-	job.CmdSetOnPath("", map[string]any{"messages": messages})
 
-	// 6. Tool routing. If the model answered with a tool-call message type, route
+	// 5. Tool routing. If the model answered with a tool-call message type, route
 	//    the flow out of the outbound port(s) named after the called function(s):
 	//    each tool call's name IS the port's route tag. CmdNextFilter hands those
 	//    tags to the runtime so only the matching ports fire next. No tool call ⇒
@@ -101,18 +103,39 @@ func runHandler(job sdkv1.Job) {
 		job.CmdNextFilter(tags)
 		job.Done(map[string]any{
 			"resumed":    resumed,
-			"messages":   len(messages),
+			"messages":   messages,         // full conversation — persisted to node scope
 			"tool_calls": result.ToolCalls, // name + raw args per call
 			"routed":     tags,             // outbound-port tags fired next
 		})
 		return
 	}
 
-	// 7. Plain-text turn — emit the node output (distinct from the committed
-	//    conversation) and let the flow follow its default route.
+	// 6. Plain-text turn — emit the node output and let the flow follow its default
+	//    route. The reply itself is the last entry of `messages` (the assistant turn
+	//    appended above), so we don't repeat it under a separate key.
 	job.Done(map[string]any{
-		"reply":    result.Content,
 		"resumed":  resumed,
-		"messages": len(messages),
+		"messages": messages,
 	})
+}
+
+// seedMessages resolves each init-template message's {{$...}} vars against the
+// live flow context and returns the non-empty ones as the initial conversation.
+// A message with a blank role defaults to "user". Content that resolves to empty
+// (an unset prompt box in the drawer) is dropped, so a system-only or user-only
+// template seats just the one message.
+func seedMessages(job sdkv1.Job, template []ChatMessage) []ChatMessage {
+	out := make([]ChatMessage, 0, len(template))
+	for _, m := range template {
+		content := resolveVars(job, m.Content)
+		if strings.TrimSpace(content) == "" {
+			continue
+		}
+		role := m.Role
+		if role == "" {
+			role = "user"
+		}
+		out = append(out, ChatMessage{Role: role, Content: content})
+	}
+	return out
 }

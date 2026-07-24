@@ -29,12 +29,22 @@ type McpTool struct {
 // Functions are the tools loaded on the node — only their names matter here (the
 // live input schemas are re-fetched from the server at run time), so an empty
 // list means "bind every tool the server advertises".
+//
+// Messages is the INIT prompt template — a system message (index 0) and/or a
+// user message (index 1), each Content optionally embedding {{$...}} vars. It
+// seeds the agentic loop's conversation on the first run only; once the node's
+// scope carries a conversation, this template is ignored (see mcpRunHandler).
 type McpRunBody struct {
-	Settings     llm.LLMSettings     `json:"settings"`
-	Connection   McpConnection       `json:"connection"`
-	Prompt       string              `json:"prompt"`        // this turn's user prompt (may contain {{$...}})
-	SystemPrompt string              `json:"system_prompt"` // system / init prompt (may contain {{$...}})
-	Functions    []llm.BoundFunction `json:"functions"`     // MCP tools bound on the node; empty ⇒ bind all
+	Settings   llm.LLMSettings     `json:"settings"`
+	Connection McpConnection       `json:"connection"`
+	Messages   []llm.ChatMessage   `json:"messages"`  // init template: system (0) and/or user (1)
+	Functions  []llm.BoundFunction `json:"functions"` // MCP tools bound on the node; empty ⇒ bind all
+}
+
+// nodeScope is the slice of the current node scope the run handler reads back:
+// the conversation committed by a prior run (empty on the first run).
+type nodeScope struct {
+	Messages []llm.ChatMessage `json:"messages"`
 }
 
 // McpCallToolBody is the inner `body` of a `call_tool` request: a connection, the

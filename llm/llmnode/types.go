@@ -29,11 +29,17 @@ type BoundFunction struct {
 }
 
 // RunBody is body of the `run` action request (the inner `body` of the envelope).
+//
+// Messages is the INIT prompt template: an ordered list of role-tagged messages
+// the settings drawer collects — a "system" message (index 0) and/or a "user"
+// message (index 1). Each message's Content may embed {{$...}} vars. It seeds the
+// conversation on the first run only; once messages exist on the node's scope,
+// this template is ignored (see the handler), so the init messages are never
+// re-added on resumed/looping runs.
 type RunBody struct {
-	Settings     LLMSettings     `json:"settings"`      // fed by the settings-profile
-	Prompt       string          `json:"prompt"`        // this turn's user prompt (may contain {{$...}})
-	SystemPrompt string          `json:"system_prompt"` // system / init prompt (may contain {{$...}})
-	Functions    []BoundFunction `json:"functions"`     // bound functions == outbound ports
+	Settings  LLMSettings     `json:"settings"`  // fed by the settings-profile
+	Messages  []ChatMessage   `json:"messages"`  // init template: system (0) and/or user (1)
+	Functions []BoundFunction `json:"functions"` // bound functions == outbound ports
 }
 
 // ChatMessage is one entry of the conversation held on the node's scope. Roles

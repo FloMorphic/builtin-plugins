@@ -8,9 +8,12 @@
 //   - settings : the *settings-profile* the frontend ships per request (e.g. a
 //     "gemini-config" profile) — the per-provider config needed to talk to an
 //     LLM. Its required shape is LLMSettings.
-//   - prompt / system_prompt : this turn's user prompt and the system/init
-//     prompt. Both may embed {{$.a.b}} variables resolved against the live flow
-//     context via job.CmdGetScope before use (see resolveVars).
+//   - messages : the INIT prompt template — an ordered array of role-tagged
+//     messages ({role, content}), typically a "system" message and a "user"
+//     turn. Content may embed {{$.a.b}} variables resolved against the live flow
+//     context via job.CmdGetScope before use (see resolveVars). It seeds the
+//     conversation on the first run only (see seedMessages); on a resumed run the
+//     persisted conversation is used as-is and this template is ignored.
 //   - functions : the *bound functions* declared in the node's settings drawer.
 //     Each bound function is an OUTBOUND PORT of the node — its name is the
 //     port's route tag. They are forwarded to the provider as tools, and let the
@@ -30,14 +33,13 @@
 //
 // Runtime scenario for `run`:
 //  1. Read this node's current scope (job.CmdGetCurrentScope).
-//  2. If it already has a non-empty `messages` array → this is a *resumed* run;
-//     otherwise it's the first run and messages are seeded.
-//  3. Resolve {{$...}} vars in the system prompt and place it at messages[0]
-//     with the canonical "system" role.
-//  4. Resolve vars in the user prompt and append it as a "user" message.
-//  5. Stream the completion from the provider named in settings via langchaingo;
+//  2. If it already has a non-empty `messages` array → this is a *resumed* run:
+//     the persisted conversation is used as-is and the body's init template is
+//     ignored. Otherwise it's the first run: seed the conversation from the init
+//     template (resolve {{$...}} vars in each message; drop empties).
+//  3. Stream the completion from the provider named in settings via langchaingo;
 //     each streamed token is surfaced through job.Progress, capped below 100
 //     (progress==100 marks the job done).
-//  6. Append the assistant reply and commit the whole array back to the current
-//     scope with job.CmdSetOnPath("messages", ...).
+//  4. Append the assistant reply and commit the whole array back to the current
+//     scope by reporting it under the "messages" key of job.Done.
 package llmnode

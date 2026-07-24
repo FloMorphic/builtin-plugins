@@ -42,7 +42,7 @@ The root binary only wires things together; everything else lives in package
 
 | Action | Purpose |
 | ------ | ------- |
-| `run`  | Resolve prompts against the flow context, stream one completion from the configured provider, commit the conversation to the node scope, and — if the model called a tool — route the flow out of the matching outbound port(s). |
+| `run`  | Seed (first run) or reload (resumed run) the conversation, stream one completion from the configured provider, persist the conversation back to the node scope, and — if the model called a tool — route the flow out of the matching outbound port(s). |
 
 ### Request body (`body`)
 
@@ -56,16 +56,27 @@ The root binary only wires things together; everything else lives in package
     "temperature": 0.7,
     "max_tokens": 0             // omitted when 0
   },
-  "prompt": "…",                // this turn's user prompt (may embed {{$.a.b}})
-  "system_prompt": "…",         // system/init prompt (may embed {{$.a.b}})
+  "messages": [                 // INIT prompt template: role-tagged messages
+    { "role": "system", "content": "…" },  // (may embed {{$.a.b}}); blank role ⇒ "user"
+    { "role": "user",   "content": "…" }
+  ],
   "functions": [                // bound functions == outbound ports
     { "name": "approve", "description": "call when the request is approved" }
   ]
 }
 ```
 
-`{{$.some.path}}` tokens in either prompt are resolved once each against the live
-flow context via `CmdGetScope` before the call.
+`messages` is the INIT template only. It seeds the conversation on the **first
+run**; once the node's scope already carries a `messages` array (a resumed or
+looping run) the template is ignored and the persisted conversation is used
+as-is. Each message's `content` may embed `{{$.a.b}}` tokens, resolved once each
+against the live flow context via `CmdGetScope` before the call; a message whose
+content resolves to empty is dropped. A template that yields no user/assistant
+turn (system-only or all-empty) fails cleanly rather than crashing the provider.
+
+The updated conversation (with the assistant reply appended) is committed back to
+the node scope via the `messages` key of the run's `Done` payload — that array
+is exactly what the next run reads back.
 
 ### Tool routing
 

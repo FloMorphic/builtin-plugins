@@ -25,6 +25,23 @@ func validateSettings(cfg LLMSettings) []string {
 	return missing
 }
 
+// hasSendableTurn reports whether the conversation carries at least one message a
+// provider can send as the request turn — i.e. a non-system message with content
+// or tool calls. Providers treat the system message as instruction-only (Gemini
+// lifts it into SystemInstruction and leaves the request history empty), so a
+// system-only or empty conversation has nothing to answer.
+func hasSendableTurn(msgs []ChatMessage) bool {
+	for _, m := range msgs {
+		if toLCRole(m.Role) == llms.ChatMessageTypeSystem {
+			continue
+		}
+		if strings.TrimSpace(m.Content) != "" || len(m.ToolCalls) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // streamChat drives one turn through the configured langchaingo provider. Bound
 // functions are forwarded as llms.Tool, so the model may answer with a tool-call
 // message type instead of (or alongside) text. Every streamed token is pushed to

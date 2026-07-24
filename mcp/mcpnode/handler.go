@@ -97,12 +97,38 @@ func mcpRunHandler(job sdkv1.Job) {
 		return
 	}
 
-	// Seed the conversation: system prompt at index 0, then this turn's user
-	// prompt. Both resolve {{$...}} against the live flow context, exactly like the
-	// LLM node.
-	messages := []llms.MessageContent{
-		{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextContent{Text: llm.ResolveVars(job, body.SystemPrompt)}}},
-		{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextContent{Text: llm.ResolveVars(job, body.Prompt)}}},
+	// Seed the conversation on the FIRST run only. body.Messages is the init
+	// template — a system message (index 0) and/or a user message (index 1); each
+	// content resolves {{$...}} against the live flow context and empty content is
+	// dropped, exactly like the LLM node. Once a prior run committed a conversation
+	// to this node's scope, that conversation is reused as-is and the template is
+	// ignored, so the init messages are never re-seeded on a resumed/looping run.
+	var scope nodeScope
+	if b, ok := job.CmdGetCurrentScope().([]byte); ok && len(b) > 0 {
+		_ = sonic.Unmarshal(b, &scope) // messages may legitimately be absent
+	}
+	seed := scope.Messages
+	if len(seed) == 0 {
+		for _, m := range body.Messages {
+			content := strings.TrimSpace(llm.ResolveVars(job, m.Content))
+			if content == "" {
+				continue
+			}
+			role := m.Role
+			if role == "" {
+				role = "user"
+			}
+			seed = append(seed, llm.ChatMessage{Role: role, Content: content})
+		}
+	}
+	messages := buildMCPMessages(seed)
+
+	// A system-only or empty conversation has no request turn for the provider to
+	// answer; Gemini/googleai in particular indexes the last non-system message and
+	// panics on an empty history. Fail cleanly instead of crashing.
+	if !hasSendableTurn(seed) {
+		job.DoneWithError("no message to send: the prompt template resolved to no user/assistant content (a system-only or empty prompt)")
+		return
 	}
 
 	callOpts := []llms.CallOption{llms.WithTemperature(cfg.Temperature), llms.WithTools(tools)}
@@ -127,12 +153,16 @@ func mcpRunHandler(job sdkv1.Job) {
 
 		// No tool call ⇒ this is the final answer.
 		if len(choice.ToolCalls) == 0 {
-			commitConversation(job, messages, choice.Content)
 			routeCalledTools(job, calledTools)
 			job.Done(map[string]any{
 				"reply":      choice.Content,
 				"turns":      turn + 1,
 				"tools_used": keysOf(calledTools),
+				// Persist the whole exchange on the node's scope so a resumed run
+				// reads it back via CmdGetCurrentScope (Done commits its data onto
+				// node.key). Seeding above skips the init template when this is
+				// non-empty, so init messages are never re-added.
+				"messages": flattenConversation(messages, choice.Content),
 			})
 			return
 		}
@@ -202,11 +232,58 @@ func selectBoundTools(serverTools []McpTool, functions []llm.BoundFunction) []Mc
 	return out
 }
 
-// commitConversation flattens the in-memory langchaingo messages plus the final
-// assistant reply into the node's scope as a `messages` array, so a downstream or
-// resumed node can read the exchange. Only text is persisted (tool-call plumbing
-// is a within-run detail).
-func commitConversation(job sdkv1.Job, messages []llms.MessageContent, finalReply string) {
+// hasSendableTurn reports whether the seeded conversation carries at least one
+// non-system message with content — something the provider can send as the
+// request turn. A system message is instruction-only (Gemini lifts it into
+// SystemInstruction, leaving an empty request history), so a system-only or empty
+// conversation has nothing to answer.
+func hasSendableTurn(msgs []llm.ChatMessage) bool {
+	for _, m := range msgs {
+		if toLCRole(m.Role) == llms.ChatMessageTypeSystem {
+			continue
+		}
+		if strings.TrimSpace(m.Content) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// buildMCPMessages turns the persisted (or freshly seeded) conversation into
+// langchaingo message content the model call consumes. Only role + text is
+// carried — the committed conversation is text-only (tool-call plumbing is a
+// within-run detail), so this is the exact inverse of flattenConversation.
+func buildMCPMessages(msgs []llm.ChatMessage) []llms.MessageContent {
+	out := make([]llms.MessageContent, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, llms.MessageContent{
+			Role:  toLCRole(m.Role),
+			Parts: []llms.ContentPart{llms.TextContent{Text: m.Content}},
+		})
+	}
+	return out
+}
+
+// toLCRole maps a canonical stored role onto langchaingo's typed role. Unknown
+// roles fall back to the human/user role so a stray value never drops a turn.
+func toLCRole(role string) llms.ChatMessageType {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "system":
+		return llms.ChatMessageTypeSystem
+	case "assistant", "ai", "model":
+		return llms.ChatMessageTypeAI
+	case "tool", "function":
+		return llms.ChatMessageTypeTool
+	default:
+		return llms.ChatMessageTypeHuman
+	}
+}
+
+// flattenConversation folds the in-memory langchaingo messages plus the final
+// assistant reply into a plain `[]llm.ChatMessage`, so the run's Done payload can
+// persist the exchange on the node's scope for a resumed run (and downstream
+// nodes) to read. Only text is kept (tool-call plumbing is a within-run detail).
+func flattenConversation(messages []llms.MessageContent, finalReply string) []llm.ChatMessage {
 	out := make([]llm.ChatMessage, 0, len(messages)+1)
 	for _, m := range messages {
 		text := textOfParts(m.Parts)
@@ -216,7 +293,7 @@ func commitConversation(job sdkv1.Job, messages []llms.MessageContent, finalRepl
 		out = append(out, llm.ChatMessage{Role: roleString(m.Role), Content: text})
 	}
 	out = append(out, llm.ChatMessage{Role: "assistant", Content: finalReply})
-	job.CmdSetOnPath("", map[string]any{"messages": out})
+	return out
 }
 
 // routeCalledTools fires an outbound port per tool that was invoked, so the flow
