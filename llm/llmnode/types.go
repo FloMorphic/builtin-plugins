@@ -19,9 +19,12 @@ type LLMSettings struct {
 // used by job.CmdNextFilter when the model calls it, and Description is the
 // model-facing text the LLM uses to decide *when* to call it — both are supplied
 // by the user in the settings drawer, and the description is required (the model
-// picks tools by their description). Parameters is the optional JSON schema of
-// the call arguments; when the drawer doesn't collect any, streamChat sends an
-// empty-object schema so the provider request stays well-formed.
+// picks tools by their description). Parameters is the JSON schema of the call
+// arguments the drawer collects per function — an object schema whose properties
+// are the arguments the model has to fill in (the values come back on the tool
+// call's Arguments). A function declared with no arguments omits it, and
+// streamChat then sends an empty-object schema so the provider request stays
+// well-formed.
 type BoundFunction struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`

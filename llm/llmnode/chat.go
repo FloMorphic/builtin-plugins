@@ -66,8 +66,8 @@ func streamChat(job sdkv1.Job, cfg LLMSettings, messages []ChatMessage, function
 		for i, f := range functions {
 			params := any(f.Parameters)
 			if f.Parameters == nil {
-				// The settings drawer collects name + description but no argument
-				// schema; send a valid empty-object schema so the request is valid.
+				// A function declared with no arguments in the settings drawer: send a
+				// valid empty-object schema so the request stays well-formed.
 				params = map[string]any{"type": "object", "properties": map[string]any{}}
 			}
 			tools[i] = llms.Tool{
