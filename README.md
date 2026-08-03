@@ -13,6 +13,7 @@ logic lives in its own package(s).
 | ------ | ------ | ------------ |
 | [`llm`](./llm) | `github.com/FloMorphic/builtin-plugins/llm` | One `run` action: a streamed LLM turn over OpenAI / OpenRouter / OpenAI-compatible / Gemini / Anthropic, with tool-call routing to outbound ports. |
 | [`mcp`](./mcp) | `github.com/FloMorphic/builtin-plugins/mcp` | An MCP client node: `run` (LLM over MCP tools), `call_tool` (call one tool, no LLM), and a `getToolsList` meta method. Split into an `llm` package (provider glue) and an `mcpnode` package. |
+| [`cast`](./cast) | `github.com/FloMorphic/builtin-plugins/cast` | One `run` action: assembles a JSON object from key/value mappings, resolving any `{{$.a.b}}` tokens in the values against the live flow context. |
 
 Each plugin pins `go-plugin-sdk` at a released tag in its own `go.mod`, builds
 independently, and reads its infra connection from a local `.env.inflow` (see the
