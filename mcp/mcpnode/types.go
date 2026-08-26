@@ -34,11 +34,17 @@ type McpTool struct {
 // user message (index 1), each Content optionally embedding {{$...}} vars. It
 // seeds the agentic loop's conversation on the first run only; once the node's
 // scope carries a conversation, this template is ignored (see mcpRunHandler).
+//
+// ClearHistory overrides that resume behaviour: when true, any conversation held
+// on the node's scope is discarded and the init template is re-seeded on EVERY
+// run, so a looping/resumed flow starts each pass from a fresh two-message init
+// instead of accumulating history.
 type McpRunBody struct {
-	Settings   llm.LLMSettings     `json:"settings"`
-	Connection McpConnection       `json:"connection"`
-	Messages   []llm.ChatMessage   `json:"messages"`  // init template: system (0) and/or user (1)
-	Functions  []llm.BoundFunction `json:"functions"` // MCP tools bound on the node; empty ⇒ bind all
+	Settings     llm.LLMSettings     `json:"settings"`
+	Connection   McpConnection       `json:"connection"`
+	Messages     []llm.ChatMessage   `json:"messages"`      // init template: system (0) and/or user (1)
+	Functions    []llm.BoundFunction `json:"functions"`     // MCP tools bound on the node; empty ⇒ bind all
+	ClearHistory bool                `json:"clear_history"` // re-seed init messages every run, ignoring node-scope history
 }
 
 // nodeScope is the slice of the current node scope the run handler reads back:

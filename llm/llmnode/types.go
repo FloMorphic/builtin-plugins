@@ -39,10 +39,16 @@ type BoundFunction struct {
 // conversation on the first run only; once messages exist on the node's scope,
 // this template is ignored (see the handler), so the init messages are never
 // re-added on resumed/looping runs.
+//
+// ClearHistory overrides that resume behaviour: when true, any conversation held
+// on the node's scope is discarded and the init template is re-seeded on EVERY
+// run, so a looping/resumed flow starts each pass from a fresh two-message init
+// instead of accumulating history.
 type RunBody struct {
-	Settings  LLMSettings     `json:"settings"`  // fed by the settings-profile
-	Messages  []ChatMessage   `json:"messages"`  // init template: system (0) and/or user (1)
-	Functions []BoundFunction `json:"functions"` // bound functions == outbound ports
+	Settings     LLMSettings     `json:"settings"`      // fed by the settings-profile
+	Messages     []ChatMessage   `json:"messages"`      // init template: system (0) and/or user (1)
+	Functions    []BoundFunction `json:"functions"`     // bound functions == outbound ports
+	ClearHistory bool            `json:"clear_history"` // re-seed init messages every run, ignoring node-scope history
 }
 
 // ChatMessage is one entry of the conversation held on the node's scope. Roles

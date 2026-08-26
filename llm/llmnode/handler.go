@@ -76,6 +76,15 @@ func runHandler(job sdkv1.Job) {
 	messages := scope.Messages
 	resumed := len(messages) > 0 // messages present & non-empty ⇒ not the first run
 
+	// clear_history: the drawer asked this node to start every run from its init
+	// template, so drop any conversation carried on the node scope and treat this
+	// as a first run. A looping/resumed flow then re-seeds the two init messages
+	// each pass instead of accumulating history.
+	if req.Body.ClearHistory {
+		messages = nil
+		resumed = false
+	}
+
 	// 2. Seed the INIT messages on the first run only. body.Messages is the prompt
 	//    template the drawer collects — a system message (index 0) and/or a user
 	//    message (index 1). Each content may embed {{$...}} vars resolved against

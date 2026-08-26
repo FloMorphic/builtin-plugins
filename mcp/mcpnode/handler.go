@@ -108,6 +108,12 @@ func mcpRunHandler(job sdkv1.Job) {
 		_ = sonic.Unmarshal(b, &scope) // messages may legitimately be absent
 	}
 	seed := scope.Messages
+	// clear_history: discard any conversation carried on the node scope so the
+	// init template below re-seeds every run, instead of the agent resuming a
+	// prior pass's history on a looping/resumed flow.
+	if body.ClearHistory {
+		seed = nil
+	}
 	if len(seed) == 0 {
 		for _, m := range body.Messages {
 			content := strings.TrimSpace(llm.ResolveVars(job, m.Content))
