@@ -42,9 +42,10 @@ type McpTool struct {
 type McpRunBody struct {
 	Settings     llm.LLMSettings     `json:"settings"`
 	Connection   McpConnection       `json:"connection"`
-	Messages     []llm.ChatMessage   `json:"messages"`      // init template: system (0) and/or user (1)
-	Functions    []llm.BoundFunction `json:"functions"`     // MCP tools bound on the node; empty ⇒ bind all
-	ClearHistory bool                `json:"clear_history"` // re-seed init messages every run, ignoring node-scope history
+	Messages     []llm.ChatMessage   `json:"messages"`       // init template: system (0) and/or user (1)
+	Functions    []llm.BoundFunction `json:"functions"`      // MCP tools bound on the node; empty ⇒ bind all
+	ClearHistory bool                `json:"clear_history"`  // re-seed init messages every run, ignoring node-scope history
+	MaxToolTurns int                 `json:"max_tool_turns"` // cap on agentic loop turns; ≤0 ⇒ defaultMcpMaxToolTurns
 }
 
 // nodeScope is the slice of the current node scope the run handler reads back:
@@ -62,7 +63,19 @@ type McpCallToolBody struct {
 	Arguments  map[string]any `json:"arguments"` // arguments matching the tool's inputSchema
 }
 
-// mcpMaxToolTurns caps the `run` agentic loop so a model that keeps asking for
-// tools can never spin forever. Each turn is one model call plus the tool calls
-// it requested.
-const mcpMaxToolTurns = 8
+// defaultMcpMaxToolTurns caps the `run` agentic loop when the request doesn't set
+// its own McpRunBody.MaxToolTurns, so a model that keeps asking for tools can
+// never spin forever. Each turn is one model call plus the tool calls it
+// requested.
+const defaultMcpMaxToolTurns = 8
+
+// resolveMaxToolTurns picks the effective loop cap: the request's value when it
+// sets a positive one, otherwise the default. This keeps the floor at the default
+// — a caller can raise the cap but not drop below it — matching the frontend's
+// minimum on the field.
+func resolveMaxToolTurns(requested int) int {
+	if requested > defaultMcpMaxToolTurns {
+		return requested
+	}
+	return defaultMcpMaxToolTurns
+}

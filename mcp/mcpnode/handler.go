@@ -144,8 +144,25 @@ func mcpRunHandler(job sdkv1.Job) {
 
 	calledTools := map[string]bool{} // tool names that fired ⇒ outbound-port tags
 	percent := 20
+	// bump ramps the progress percentage toward — but never up to — 100, which the
+	// runtime reserves for "done". Every activity frame below goes through it so the
+	// pie chart keeps advancing across turns and tool calls.
+	bump := func() int {
+		if percent < 95 {
+			percent++
+		}
+		return percent
+	}
 
-	for turn := 0; turn < mcpMaxToolTurns; turn++ {
+	maxTurns := resolveMaxToolTurns(body.MaxToolTurns)
+	for turn := 0; turn < maxTurns; turn++ {
+		// Show that the model is being consulted this turn (no token stream — the
+		// MCP node waits for the whole completion, so this is the "thinking" beat).
+		job.Progress(bump(), sdkv1.Frame{
+			Title:   "thinking",
+			Content: fmt.Sprintf("consulting %s (turn %d)", cfg.Model, turn+1),
+		})
+
 		resp, err := model.GenerateContent(ctx, messages, callOpts...)
 		if err != nil {
 			job.DoneWithError(err.Error())
@@ -184,6 +201,12 @@ func mcpRunHandler(job sdkv1.Job) {
 		}
 		messages = append(messages, llms.MessageContent{Role: llms.ChatMessageTypeAI, Parts: aiParts})
 
+		// Announce the batch of tools the model picked this turn before running any.
+		job.Progress(bump(), sdkv1.Frame{
+			Title:   "tools selected",
+			Content: strings.Join(toolCallNames(choice.ToolCalls), ", "),
+		})
+
 		// Execute each requested tool on the MCP server and feed results back.
 		for _, tc := range choice.ToolCalls {
 			if tc.FunctionCall == nil {
@@ -191,10 +214,7 @@ func mcpRunHandler(job sdkv1.Job) {
 			}
 			name := tc.FunctionCall.Name
 			calledTools[name] = true
-			if percent < 90 {
-				percent += 5
-			}
-			job.Progress(percent, sdkv1.Frame{Title: "calling tool", Content: name})
+			job.Progress(bump(), sdkv1.Frame{Title: "calling tool", Content: name})
 
 			result, callErr := callMCPTool(ctx, cli, name, tc.FunctionCall.Arguments)
 			messages = append(messages, llms.MessageContent{
@@ -208,14 +228,17 @@ func mcpRunHandler(job sdkv1.Job) {
 			if callErr != nil {
 				// Surface the failure to the model as the tool's content (already
 				// prefixed) so it can recover; don't abort the whole run.
+				job.Progress(bump(), sdkv1.Frame{Title: "tool failed", Content: name + ": " + callErr.Error()})
 				_ = callErr
+			} else {
+				job.Progress(bump(), sdkv1.Frame{Title: "tool done", Content: name})
 			}
 		}
 	}
 
 	// Hit the turn cap without the model settling on a text answer.
 	routeCalledTools(job, calledTools)
-	job.DoneWithError(fmt.Sprintf("reached max tool turns (%d) without a final answer", mcpMaxToolTurns))
+	job.DoneWithError(fmt.Sprintf("reached max tool turns (%d) without a final answer", maxTurns))
 }
 
 // selectBoundTools keeps the server tools whose names appear in the node's bound
@@ -315,6 +338,18 @@ func keysOf(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
+	}
+	return out
+}
+
+// toolCallNames lists the function names of a turn's tool calls, in order, for an
+// activity frame. Calls without a FunctionCall are skipped.
+func toolCallNames(calls []llms.ToolCall) []string {
+	out := make([]string, 0, len(calls))
+	for _, tc := range calls {
+		if tc.FunctionCall != nil {
+			out = append(out, tc.FunctionCall.Name)
+		}
 	}
 	return out
 }
