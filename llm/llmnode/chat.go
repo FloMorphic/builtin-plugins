@@ -82,18 +82,12 @@ func streamChat(job sdkv1.Job, cfg LLMSettings, messages []ChatMessage, function
 		callOpts = append(callOpts, llms.WithTools(tools))
 	}
 
-	// Stream tokens straight to the canvas as they arrive.
-	var full strings.Builder
-	percent := 25 // start of the streaming window; grows toward (but never hits) 100
+	// Stream tokens to the canvas through a batcher so we emit at most a bounded
+	// number of progress frames, no matter how finely the provider chops the
+	// response (OpenAI streams one token per chunk — see frameBatcher).
+	batch := newFrameBatcher(job, "generating")
 	callOpts = append(callOpts, llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
-		full.Write(chunk)
-		if percent < 95 {
-			percent++
-		}
-		job.Progress(percent, sdkv1.Frame{
-			Title:   "generating",
-			Content: full.String(), // the live, accumulating completion
-		})
+		batch.Add(chunk)
 		return nil
 	}))
 
@@ -101,6 +95,7 @@ func streamChat(job sdkv1.Job, cfg LLMSettings, messages []ChatMessage, function
 	if err != nil {
 		return completion{}, err
 	}
+	batch.Flush() // show the complete text before the caller finalizes the job
 	if len(resp.Choices) == 0 {
 		return completion{}, fmt.Errorf("provider returned no choices")
 	}
