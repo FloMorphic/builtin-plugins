@@ -3,7 +3,7 @@ module github.com/FloMorphic/builtin-plugins/cast
 go 1.26.2
 
 require (
-	github.com/Inflowenger/go-plugin-sdk v0.1.7
+	github.com/Inflowenger/go-plugin-sdk v0.2.2
 	github.com/bytedance/sonic v1.15.2
 )
 
