@@ -15,6 +15,7 @@ logic lives in its own package(s).
 | [`mcp`](./mcp) | `github.com/FloMorphic/builtin-plugins/mcp` | An MCP client node: `run` (LLM over MCP tools), `call_tool` (call one tool, no LLM), and a `getToolsList` meta method. Split into an `llm` package (provider glue) and an `mcpnode` package. |
 | [`cast`](./cast) | `github.com/FloMorphic/builtin-plugins/cast` | One `run` action: assembles a JSON object from key/value mappings, resolving any `{{$.a.b}}` tokens in the values against the live flow context. |
 | [`http`](./http) | `github.com/FloMorphic/builtin-plugins/http` | One `run` action: makes an HTTP / REST request (method, URL, headers, query, body) with connection config (base URL, auth, default headers) from a settings profile, resolving `{{$.a.b}}` tokens in every string field. |
+| [`jev`](./jev) | `github.com/FloMorphic/builtin-plugins/jev` | One `run` action: evaluates a state template against typed questions (choice / score / noul) on TypeSafe's Jev (System One) in a single call, and routes each question's top answer to its outbound port (`<question>.<option>`), full distribution on the scope. |
 
 Each plugin pins `go-plugin-sdk` at a released tag in its own `go.mod`, builds
 independently, and reads its infra connection from a local `.env.inflow` (see the
