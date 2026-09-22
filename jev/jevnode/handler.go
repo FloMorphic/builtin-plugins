@@ -153,10 +153,11 @@ func runHandler(job sdkv1.Job) {
 		Exception(job, "low_confidence",
 			"confidence below the floor for question(s): "+strings.Join(uncertain, ", "),
 			map[string]any{
-				"model":     model,
-				"uncertain": uncertain,
-				"answers":   decisions,
-				"usage":     resp.Usage,
+				"model":        model,
+				"uncertain":    uncertain,
+				"answers":      decisions,
+				"usage":        resp.Usage,
+				"credits_used": resp.CreditsUsed,
 			})
 		return
 	}
@@ -175,5 +176,9 @@ func runHandler(job sdkv1.Job) {
 		"answers": decisions, // every decision, keyed by question id — what lands on the scope
 		"routed":  tags,      // outbound-port tags fired next (empty when nothing routes)
 		"usage":   resp.Usage,
+		// What the call cost and how long the service took. A metered decider is
+		// worth accounting for on the canvas, not only in the vendor console.
+		"credits_used": resp.CreditsUsed,
+		"elapsed_ms":   resp.ElapsedMs,
 	})
 }

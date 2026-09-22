@@ -38,8 +38,8 @@ jevnode/       all node functionality
 {
   "settings": {                       // settings-profile the frontend ships per request
     "access_token": "…",              // required — TypeSafe API key
-    "model": "jev-latest",            // optional, defaults to jev-latest
-    "url": "",                        // optional custom base URL (default https://api.typesafe.ai)
+    "model": "jev-latest",            // optional, defaults to jev-latest (or pin "typesafe/jev-1.13")
+    "url": "",                        // optional custom base URL (default https://thejevai.com)
     "timeout_seconds": 30             // optional
   },
   "state": "Ticket from {{$.ticket.customer}}: {{$.ticket.text}}",
@@ -86,6 +86,21 @@ What the option rows mean per type:
 
 An empty description falls back to the name.
 
+### Endpoint & reply shape
+
+The node posts to `<base>/v1/systemone` with `Authorization: Bearer <access_token>`,
+where `<base>` is the profile's `url` or `https://thejevai.com`. Two notes, both
+learned against the live service rather than from the reference:
+
+- `docs.typesafe.ai` documents `https://api.typesafe.ai`, which answers `401` to
+  every key. The host that serves the API is `thejevai.com`, and it sits behind a
+  CDN that screens unfamiliar clients — the node sends an explicit `User-Agent`.
+- The live reply is **wrapped**: `{"code":0,"message":"ok","data":{"result":{…},"creditsUsed":1}}`,
+  while the reference shows the answer document flat at the top level. The node
+  decodes both (see `apiResponse.reply`), treats a non-zero `code` on an HTTP 200
+  as a failure, and reports `credits_used` / `elapsed_ms` on the node output so a
+  metered decider is accounted for on the canvas.
+
 ### Routing
 
 A question with `route` on turns its options into the node's outbound ports.
@@ -128,6 +143,8 @@ empty state) are not exceptions: plain `DoneWithError`, no routing.
 {
   "model": "jev-1.13.0",
   "routed": ["category.billing", "repeat.no"],
+  "credits_used": 1,
+  "elapsed_ms": 1801,
   "answers": {
     "category": { "question": "category", "type": "choice", "answer": "billing", "tag": "category.billing",
                   "confidence": 0.81, "probabilities": { "billing": 0.88, "technical": 0.12, "sales": 0.0, "other": 0.0 }, "routed": true },

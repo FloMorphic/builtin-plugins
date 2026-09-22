@@ -53,7 +53,7 @@ func TestCallJev(t *testing.T) {
 				http.Error(w, `{"error":"rate limited"}`, http.StatusTooManyRequests)
 				return
 			}
-			_, _ = w.Write([]byte(`{"model":"jev","answers":{}}`))
+			_, _ = w.Write([]byte(`{"model":"jev","answers":{"q":{"type":"noul","noul":0.6}}}`))
 		}))
 		defer srv.Close()
 		_, err := callJev(context.Background(), JevSettings{AccessToken: "k", URL: srv.URL}, apiRequest{})
@@ -99,4 +99,77 @@ func TestCallJev(t *testing.T) {
 			t.Fatalf("calls = %d, want %d", calls, maxAttempts)
 		}
 	})
+}
+
+// The live service wraps the answer document in {code, message, data:{result,
+// creditsUsed}} while the published reference shows it flat. Both have to land
+// on the same normalized reply, and a non-zero `code` — a failure the service
+// reports with HTTP 200 — must not pass as an answer.
+func TestCallJevEnvelope(t *testing.T) {
+	serve := func(body string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if ua := r.Header.Get("User-Agent"); ua != userAgent {
+				t.Errorf("User-Agent = %q, want %q", ua, userAgent)
+			}
+			_, _ = w.Write([]byte(body))
+		}))
+	}
+
+	t.Run("enveloped reply is unwrapped, credits carried", func(t *testing.T) {
+		srv := serve(`{"code":0,"message":"ok","data":{"result":{"answers":{"urgency":{"type":"noul","noul":0.61}},"usage":{"input_tokens":311,"output_tokens":21},"elapsedMs":1801},"creditsUsed":1}}`)
+		defer srv.Close()
+		got, err := callJev(context.Background(), JevSettings{AccessToken: "k", URL: srv.URL}, apiRequest{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if *got.Answers["urgency"].Noul != 0.61 {
+			t.Errorf("answers = %+v", got.Answers)
+		}
+		if got.CreditsUsed != 1 || got.ElapsedMs != 1801 {
+			t.Errorf("credits = %d, elapsed = %d", got.CreditsUsed, got.ElapsedMs)
+		}
+		if got.Usage["input_tokens"] != float64(311) {
+			t.Errorf("usage = %v", got.Usage)
+		}
+	})
+
+	t.Run("flat reply still works", func(t *testing.T) {
+		srv := serve(`{"model":"jev-1.13.0","answers":{"urgency":{"type":"noul","noul":0.2}},"usage":{"input_tokens":10}}`)
+		defer srv.Close()
+		got, err := callJev(context.Background(), JevSettings{AccessToken: "k", URL: srv.URL}, apiRequest{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Model != "jev-1.13.0" || *got.Answers["urgency"].Noul != 0.2 || got.CreditsUsed != 0 {
+			t.Errorf("reply = %+v", got)
+		}
+	})
+
+	t.Run("non-zero code on HTTP 200 is an error", func(t *testing.T) {
+		srv := serve(`{"code":4001,"message":"insufficient credits","data":null}`)
+		defer srv.Close()
+		_, err := callJev(context.Background(), JevSettings{AccessToken: "k", URL: srv.URL}, apiRequest{})
+		if err == nil || !strings.Contains(err.Error(), "insufficient credits") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
+	t.Run("an empty answer set is an error, not a silent pass", func(t *testing.T) {
+		srv := serve(`{"code":0,"message":"ok","data":{"result":{"answers":{}},"creditsUsed":0}}`)
+		defer srv.Close()
+		if _, err := callJev(context.Background(), JevSettings{AccessToken: "k", URL: srv.URL}, apiRequest{}); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+}
+
+// The default endpoint is the host that actually serves the API, and a profile
+// URL overrides it.
+func TestBaseURL(t *testing.T) {
+	if got := baseURL(JevSettings{}); got != "https://thejevai.com" {
+		t.Errorf("default baseURL = %q", got)
+	}
+	if got := baseURL(JevSettings{URL: "https://proxy.internal/"}); got != "https://proxy.internal" {
+		t.Errorf("override baseURL = %q", got)
+	}
 }

@@ -2,11 +2,11 @@ package jevnode
 
 // JevSettings is the shape the frontend settings-profile must produce. Collect
 // these into a profile (e.g. "jev-config") and ship them in body.settings. Only
-// the access token is required; the model defaults to "jev-latest" and the base
-// URL to TypeSafe's public endpoint.
+// the access token is required; the model defaults to defaultModel and the base
+// URL to the service's own endpoint.
 type JevSettings struct {
 	AccessToken    string `json:"access_token"`    // bearer API key
-	Model          string `json:"model"`           // model id, e.g. "jev-latest"; empty ⇒ defaultModel
+	Model          string `json:"model"`           // model id, e.g. "typesafe/jev-1.13"; empty ⇒ defaultModel
 	URL            string `json:"url"`             // optional custom *base* URL; empty ⇒ defaultBaseURL
 	TimeoutSeconds int    `json:"timeout_seconds"` // optional per-call timeout; ≤0 ⇒ defaultTimeout
 }
@@ -101,12 +101,66 @@ type apiQuestion struct {
 	Criteria     any    `json:"criteria,omitempty"`
 }
 
-// apiResponse is the reply: one answer per question id, plus the exact model
-// version that answered and the token usage.
+// apiResponse is the reply, decoded permissively because the service and the
+// published reference disagree on where the answers sit. The live endpoint
+// wraps them — {"code":0,"message":"ok","data":{"result":{…},"creditsUsed":1}}
+// — while docs.typesafe.ai's API reference shows the same document flat at the
+// top level. Both are decoded here and reconciled by reply(): Data wins when
+// present, the flat fields are the fallback, so neither shape breaks the node.
 type apiResponse struct {
+	// enveloped form (what api returns today)
+	Code    int      `json:"code"`
+	Message string   `json:"message"`
+	Data    *apiData `json:"data"`
+
+	// flat form (the published reference)
 	Model   string               `json:"model"`
 	Answers map[string]apiAnswer `json:"answers"`
 	Usage   map[string]any       `json:"usage"`
+}
+
+// apiData is the envelope's payload: the answer document plus what the call
+// cost. CreditsUsed is worth carrying to the canvas — a decision node runs on a
+// metered budget, and the run that spent the credit is the only place that can
+// report it.
+type apiData struct {
+	Result      apiResult `json:"result"`
+	CreditsUsed int       `json:"creditsUsed"`
+}
+
+// apiResult is the answer document itself: one answer per question id, the
+// exact model version that answered, the token usage and the service-side
+// latency.
+type apiResult struct {
+	Model     string               `json:"model"`
+	Answers   map[string]apiAnswer `json:"answers"`
+	Usage     map[string]any       `json:"usage"`
+	ElapsedMs int                  `json:"elapsedMs"`
+}
+
+// reply is the normalized result the handler works with, whichever shape the
+// service answered in.
+type reply struct {
+	Model       string
+	Answers     map[string]apiAnswer
+	Usage       map[string]any
+	ElapsedMs   int
+	CreditsUsed int
+}
+
+// reply reconciles the two shapes: the envelope when the service sent one,
+// otherwise the flat document.
+func (r apiResponse) reply() reply {
+	if r.Data != nil {
+		return reply{
+			Model:       r.Data.Result.Model,
+			Answers:     r.Data.Result.Answers,
+			Usage:       r.Data.Result.Usage,
+			ElapsedMs:   r.Data.Result.ElapsedMs,
+			CreditsUsed: r.Data.CreditsUsed,
+		}
+	}
+	return reply{Model: r.Model, Answers: r.Answers, Usage: r.Usage}
 }
 
 // apiAnswer is the union of the three answer shapes; only the fields of the

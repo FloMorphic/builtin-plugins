@@ -13,7 +13,15 @@ import (
 )
 
 const (
-	defaultBaseURL = "https://api.typesafe.ai"
+	// The service's own host. docs.typesafe.ai documents api.typesafe.ai, which
+	// answers 401 to every key — thejevai.com is the endpoint that serves the
+	// System One API. A profile can still point `url` elsewhere (a proxy, a
+	// private deployment).
+	defaultBaseURL = "https://thejevai.com"
+	// The documented alias. The service also accepts a vendor-prefixed, pinned
+	// id ("typesafe/jev-1.13"), which is the safer thing to put in a profile
+	// once a flow is in production — a decision node changing model under a
+	// flow is a change someone should choose.
 	defaultModel   = "jev-latest"
 	defaultTimeout = 30 * time.Second
 	endpointPath   = "/v1/systemone"
@@ -27,6 +35,10 @@ const (
 
 	// How much of an error reply body is quoted back in the failure reason.
 	errBodyLimit = 300
+
+	// The host sits behind a CDN that screens unfamiliar clients, so identify
+	// the node rather than leaving Go's default agent on the request.
+	userAgent = "flomorphic-jev-node/0.1"
 )
 
 // baseURL returns the profile's base URL or the public default, without a
@@ -60,10 +72,10 @@ func timeoutOf(cfg JevSettings) time.Duration {
 // non-2xx status is returned at once with the status and a slice of the body so
 // the exception branch can see what the API objected to (a 422 names the
 // question that failed validation).
-func callJev(ctx context.Context, cfg JevSettings, req apiRequest) (apiResponse, error) {
+func callJev(ctx context.Context, cfg JevSettings, req apiRequest) (reply, error) {
 	payload, err := sonic.Marshal(req)
 	if err != nil {
-		return apiResponse{}, fmt.Errorf("encode request: %w", err)
+		return reply{}, fmt.Errorf("encode request: %w", err)
 	}
 	client := &http.Client{Timeout: timeoutOf(cfg)}
 	url := baseURL(cfg) + endpointPath
@@ -75,7 +87,7 @@ func callJev(ctx context.Context, cfg JevSettings, req apiRequest) (apiResponse,
 			select {
 			case <-time.After(wait):
 			case <-ctx.Done():
-				return apiResponse{}, ctx.Err()
+				return reply{}, ctx.Err()
 			}
 		}
 		resp, retry, err := postOnce(ctx, client, url, cfg.AccessToken, payload)
@@ -87,40 +99,50 @@ func callJev(ctx context.Context, cfg JevSettings, req apiRequest) (apiResponse,
 			break
 		}
 	}
-	return apiResponse{}, lastErr
+	return reply{}, lastErr
 }
 
 // postOnce performs a single attempt. The retry flag tells the caller whether
 // the failure is one the API asks to be retried (rate limit / overload).
-func postOnce(ctx context.Context, client *http.Client, url, token string, payload []byte) (apiResponse, bool, error) {
+func postOnce(ctx context.Context, client *http.Client, url, token string, payload []byte) (reply, bool, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
-		return apiResponse{}, false, err
+		return reply{}, false, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("User-Agent", userAgent)
 	httpReq.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
 
 	res, err := client.Do(httpReq)
 	if err != nil {
-		return apiResponse{}, false, err
+		return reply{}, false, err
 	}
 	defer res.Body.Close()
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		return apiResponse{}, false, fmt.Errorf("read reply: %w", err)
+		return reply{}, false, fmt.Errorf("read reply: %w", err)
 	}
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		retry := res.StatusCode == http.StatusTooManyRequests || res.StatusCode == 529
-		return apiResponse{}, retry, fmt.Errorf("jev api %s: %s", res.Status, snippet(body))
+		return reply{}, retry, fmt.Errorf("jev api %s: %s", res.Status, snippet(body))
 	}
 
 	var out apiResponse
 	if err := sonic.Unmarshal(body, &out); err != nil {
-		return apiResponse{}, false, fmt.Errorf("decode reply: %w (%s)", err, snippet(body))
+		return reply{}, false, fmt.Errorf("decode reply: %w (%s)", err, snippet(body))
 	}
-	return out, false, nil
+	// The envelope carries its own status: a non-zero `code` is a failure the
+	// service reported with HTTP 200, so it must not pass as an answer.
+	if out.Code != 0 {
+		return reply{}, false, fmt.Errorf("jev api code %d: %s", out.Code, out.Message)
+	}
+	r := out.reply()
+	if len(r.Answers) == 0 {
+		return reply{}, false, fmt.Errorf("jev api returned no answers (%s)", snippet(body))
+	}
+	return r, false, nil
 }
 
 // snippet trims a reply body to a single-line excerpt for an error message.
