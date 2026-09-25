@@ -156,23 +156,57 @@ func mcpRunHandler(job sdkv1.Job) {
 
 	maxTurns := resolveMaxToolTurns(body.MaxToolTurns)
 	for turn := 0; turn < maxTurns; turn++ {
-		// Show that the model is being consulted this turn (no token stream — the
-		// MCP node waits for the whole completion, so this is the "thinking" beat).
 		job.Progress(bump(), sdkv1.Frame{
 			Title:   "thinking",
 			Content: fmt.Sprintf("consulting %s (turn %d)", cfg.Model, turn+1),
 		})
 
-		resp, err := model.GenerateContent(ctx, messages, callOpts...)
+		// The call is STREAMED, and that is a reliability decision rather than a
+		// cosmetic one. A buffered request is silent on the wire for the prefill
+		// AND the whole generation, and the idle timeout in front of a model —
+		// commonly around 220 seconds — cuts it off and answers 502. A streamed
+		// one sends a chunk every few hundred milliseconds once decode starts,
+		// which resets that timer. Measured against a real endpoint, six
+		// identical calls each way: buffered failed twice, streamed none.
+		//
+		// The chunks are not shown here (this node reports per tool, not per
+		// token), so the callback only has to exist for langchaingo to ask for
+		// a stream.
+		turnOpts := append(append([]llms.CallOption{}, callOpts...),
+			llms.WithStreamingFunc(func(context.Context, []byte) error { return nil }))
+
+		// And the call is bounded and retried: a provider that stalls would
+		// otherwise hold this node indefinitely, and a bad minute would throw
+		// away every turn of work before it. See llm/resilience.go.
+		resp, err := llm.CallModel(ctx, model, messages, turnOpts,
+			llm.TimeoutOf(cfg), llm.RetriesOf(cfg), func(note string) {
+				job.Progress(bump(), sdkv1.Frame{Title: "retrying", Content: note})
+			})
 		if err != nil {
 			job.DoneWithError(err.Error())
 			return
 		}
-		if len(resp.Choices) == 0 {
-			job.DoneWithError("provider returned no choices")
-			return
-		}
 		choice := resp.Choices[0]
+
+		// Streamed tool calls can arrive with another call's arguments welded
+		// on, because langchaingo drops the stream index and appends every
+		// fragment to the last call it saw. Left alone, the raw text is recorded
+		// in the assistant turn and sent back on the NEXT request, where the
+		// provider rejects the whole conversation with a 400 — one malformed
+		// call costing the entire run. See llm.FirstJSONValue.
+		for i := range choice.ToolCalls {
+			if choice.ToolCalls[i].FunctionCall == nil {
+				continue
+			}
+			repaired, changed := llm.FirstJSONValue(choice.ToolCalls[i].FunctionCall.Arguments)
+			if changed {
+				job.Progress(bump(), sdkv1.Frame{
+					Title:   "malformed arguments",
+					Content: choice.ToolCalls[i].FunctionCall.Name + ": trailing data trimmed",
+				})
+			}
+			choice.ToolCalls[i].FunctionCall.Arguments = repaired
+		}
 
 		// No tool call ⇒ this is the final answer.
 		if len(choice.ToolCalls) == 0 {

@@ -12,6 +12,19 @@ type LLMSettings struct {
 	AccessToken string  `json:"access_token"` // bearer token / api key
 	Temperature float64 `json:"temperature"`  // sampling temperature
 	MaxTokens   int     `json:"max_tokens"`   // optional; omitted when 0
+
+	// RequestTimeoutS bounds ONE model call, and MaxRetries is how many further
+	// attempts a failed one gets. They describe how reliable a particular
+	// endpoint is, which is a property of the endpoint rather than of the work,
+	// so they belong to the connection profile.
+	//
+	// RequestTimeoutS of zero takes the default. MaxRetries is a POINTER so
+	// that "do not retry" and "unset" are different things: nil (absent from
+	// the profile) takes the default, and an explicit 0 turns retrying off.
+	// An int could not express both, which would leave a settings form with no
+	// way to say "never retry this endpoint".
+	RequestTimeoutS int  `json:"request_timeout_s"`
+	MaxRetries      *int `json:"max_retries"`
 }
 
 // BoundFunction is one function bound to the LLM session in the node's settings

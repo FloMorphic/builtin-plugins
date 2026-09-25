@@ -100,7 +100,9 @@ func runHandler(job sdkv1.Job) {
 
 	// 4. Send it.
 	client := newClient(settings)
-	resp, err := client.Do(httpReq)
+	resp, err := send(client, httpReq, retriesOf(settings), func(note string) {
+		job.Progress(60, sdkv1.Frame{Title: "retrying", Content: note})
+	})
 	if err != nil {
 		job.DoneWithError("request failed: " + err.Error())
 		return

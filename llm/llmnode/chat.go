@@ -2,7 +2,6 @@ package llmnode
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/Inflowenger/go-plugin-sdk/sdkv1"
@@ -91,14 +90,17 @@ func streamChat(job sdkv1.Job, cfg LLMSettings, messages []ChatMessage, function
 		return nil
 	}))
 
-	resp, err := llm.GenerateContent(ctx, buildMessages(messages), callOpts...)
+	// A model call is bounded and retried: a provider that stalls would
+	// otherwise hold this node indefinitely, and one having a bad minute would
+	// fail a turn that a second attempt answers. See resilience.go.
+	resp, err := callModel(ctx, llm, buildMessages(messages), callOpts,
+		timeoutOf(cfg), retriesOf(cfg), func(note string) {
+			job.Progress(batch.percent, sdkv1.Frame{Title: "retrying", Content: note})
+		})
 	if err != nil {
 		return completion{}, err
 	}
 	batch.Flush() // show the complete text before the caller finalizes the job
-	if len(resp.Choices) == 0 {
-		return completion{}, fmt.Errorf("provider returned no choices")
-	}
 	choice := resp.Choices[0]
 
 	out := completion{Content: choice.Content}
@@ -106,7 +108,11 @@ func streamChat(job sdkv1.Job, cfg LLMSettings, messages []ChatMessage, function
 		call := toolCall{ID: tc.ID}
 		if tc.FunctionCall != nil {
 			call.Name = tc.FunctionCall.Name
-			call.Arguments = tc.FunctionCall.Arguments
+			// Streamed tool calls can arrive with another call's arguments
+			// welded on, and these arguments go straight out to the flow as
+			// this node's routed output. Unparseable JSON reaching a downstream
+			// node is worse than a trimmed object. See FirstJSONValue.
+			call.Arguments, _ = FirstJSONValue(tc.FunctionCall.Arguments)
 		}
 		out.ToolCalls = append(out.ToolCalls, call)
 	}

@@ -22,14 +22,26 @@ type KV struct {
 //   - "api_key" : a single header (HeaderName, default Authorization) set to Token.
 type HTTPSettings struct {
 	BaseURL            string `json:"base_url"`             // prepended to a relative request URL
-	AuthType           string `json:"auth_type"`           // "", none, basic, bearer, api_key
-	Username           string `json:"username"`            // basic auth user
-	Password           string `json:"password"`            // basic auth password
-	Token              string `json:"token"`               // bearer / api_key value
-	HeaderName         string `json:"header_name"`         // api_key header name (default Authorization)
-	Headers            []KV   `json:"headers"`             // default headers on every request
-	TimeoutSeconds     int    `json:"timeout_seconds"`     // request timeout; 0 → default
+	AuthType           string `json:"auth_type"`            // "", none, basic, bearer, api_key
+	Username           string `json:"username"`             // basic auth user
+	Password           string `json:"password"`             // basic auth password
+	Token              string `json:"token"`                // bearer / api_key value
+	HeaderName         string `json:"header_name"`          // api_key header name (default Authorization)
+	Headers            []KV   `json:"headers"`              // default headers on every request
+	TimeoutSeconds     int    `json:"timeout_seconds"`      // request timeout; 0 → default
 	InsecureSkipVerify bool   `json:"insecure_skip_verify"` // skip TLS cert verification
+
+	// MaxRetries is how many further attempts a failed request gets. It is a
+	// POINTER so that "do not retry" and "unset" are different things: nil
+	// (absent from the profile) takes the default, and an explicit 0 turns
+	// retrying off — which matters more here than anywhere, because an operator
+	// pointing this node at a non-idempotent endpoint may want exactly that.
+	//
+	// What is retried depends on the METHOD, because an HTTP request may have a
+	// side effect: idempotent methods are retried on any transient failure,
+	// while POST and PATCH are retried only when the request provably never
+	// reached the server. See retry.go.
+	MaxRetries *int `json:"max_retries"`
 }
 
 // RunBody is the inner `body` of the run action envelope
