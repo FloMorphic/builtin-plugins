@@ -1,10 +1,10 @@
 module github.com/FloMorphic/builtin-plugins/llm
 
-go 1.26.2
+go 1.27
 
 require (
 	github.com/Inflowenger/go-plugin-sdk v0.2.3
-	github.com/bytedance/sonic v1.15.2
+	github.com/bytedance/sonic v1.15.4
 	github.com/tmc/langchaingo v0.1.14
 )
 
@@ -19,7 +19,7 @@ require (
 	cloud.google.com/go/longrunning v0.6.2 // indirect
 	cloud.google.com/go/vertexai v0.12.0 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
-	github.com/bytedance/sonic/loader v0.5.1 // indirect
+	github.com/bytedance/sonic/loader v0.5.2 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/dlclark/regexp2 v1.10.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect

@@ -1,6 +1,6 @@
 module github.com/FloMorphic/builtin-plugins/jev
 
-go 1.26.2
+go 1.27
 
 require (
 	github.com/Inflowenger/go-plugin-sdk v0.2.3
