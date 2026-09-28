@@ -3,7 +3,7 @@ module github.com/FloMorphic/builtin-plugins/llm
 go 1.27
 
 require (
-	github.com/Inflowenger/go-plugin-sdk v0.2.3
+	github.com/Inflowenger/go-plugin-sdk v0.2.4
 	github.com/bytedance/sonic v1.15.4
 	github.com/tmc/langchaingo v0.1.14
 )
