@@ -1,9 +1,11 @@
 package mcpnode
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/FloMorphic/builtin-plugins/mcp/llm"
+	"github.com/tmc/langchaingo/llms"
 )
 
 func names(ts []McpTool) []string {
@@ -101,4 +103,65 @@ func TestResolveMaxToolTurns(t *testing.T) {
 			t.Errorf("resolveMaxToolTurns(%d) = %d, want %d", c.in, got, c.want)
 		}
 	}
+}
+
+// allow builds the execution-time whitelist the run loop derives from `bound`.
+func allow(ns ...string) map[string]bool {
+	m := make(map[string]bool, len(ns))
+	for _, n := range ns {
+		m[n] = true
+	}
+	return m
+}
+
+func TestUnboundRefusal(t *testing.T) {
+	readOnly := allow("list_files", "read_files", "search_files")
+
+	t.Run("a bound tool is not refused", func(t *testing.T) {
+		if _, refused := unboundRefusal(readOnly, "call-1", "read_files"); refused {
+			t.Fatal("refused a tool that is bound")
+		}
+	})
+
+	// The whole point of the guard: the model asks for a write/shell tool it was
+	// never advertised, and the node must not call it on the server.
+	t.Run("an unbound tool is refused", func(t *testing.T) {
+		for _, name := range []string{"run_command", "write_file", "edit_file", "hallucinated_tool"} {
+			msg, refused := unboundRefusal(readOnly, "call-2", name)
+			if !refused {
+				t.Fatalf("%s was not refused", name)
+			}
+			if msg.Role != llms.ChatMessageTypeTool {
+				t.Errorf("%s: role = %v, want tool", name, msg.Role)
+			}
+			if len(msg.Parts) != 1 {
+				t.Fatalf("%s: got %d parts, want 1", name, len(msg.Parts))
+			}
+			resp, ok := msg.Parts[0].(llms.ToolCallResponse)
+			if !ok {
+				t.Fatalf("%s: part is %T, want ToolCallResponse", name, msg.Parts[0])
+			}
+			// The id must be echoed back or the next provider request is malformed.
+			if resp.ToolCallID != "call-2" {
+				t.Errorf("%s: ToolCallID = %q, want call-2", name, resp.ToolCallID)
+			}
+			if resp.Name != name {
+				t.Errorf("%s: Name = %q", name, resp.Name)
+			}
+			if !strings.Contains(resp.Content, name) {
+				t.Errorf("%s: content does not name the tool: %q", name, resp.Content)
+			}
+			if !strings.Contains(resp.Content, "not bound") {
+				t.Errorf("%s: content does not say why: %q", name, resp.Content)
+			}
+		}
+	})
+
+	// selectBoundTools returning nothing already aborts the run, so this is only a
+	// belt-and-braces check that an empty map does not silently allow everything.
+	t.Run("an empty whitelist refuses everything", func(t *testing.T) {
+		if _, refused := unboundRefusal(map[string]bool{}, "call-3", "list_files"); !refused {
+			t.Fatal("empty whitelist allowed a call")
+		}
+	})
 }

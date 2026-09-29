@@ -257,20 +257,9 @@ func mcpRunHandler(job sdkv1.Job) {
 				continue
 			}
 			name := tc.FunctionCall.Name
-			if !allowed[name] {
-				// Answer the call rather than dropping it: every tool_call id needs a
-				// response or the next request is malformed for most providers. The
-				// model is told why, so it can pick something it does have.
+			if refusal, refused := unboundRefusal(allowed, tc.ID, name); refused {
 				job.Progress(bump(), sdkv1.Frame{Title: "tool refused", Content: name + ": not bound on this node"})
-				messages = append(messages, llms.MessageContent{
-					Role: llms.ChatMessageTypeTool,
-					Parts: []llms.ContentPart{llms.ToolCallResponse{
-						ToolCallID: tc.ID,
-						Name:       name,
-						Content: "error: the tool " + name + " is not bound on this node and was not called. " +
-							"Use only the tools you were given.",
-					}},
-				})
+				messages = append(messages, refusal)
 				continue
 			}
 			// Recorded only once the call is actually allowed, so tools_used reports
@@ -300,6 +289,31 @@ func mcpRunHandler(job sdkv1.Job) {
 
 	// Hit the turn cap without the model settling on a text answer.
 	job.DoneWithError(fmt.Sprintf("reached max tool turns (%d) without a final answer", maxTurns))
+}
+
+// unboundRefusal answers a tool call for a name this node never advertised,
+// reporting refused=true when it did so. It exists because the whitelist has to
+// hold at EXECUTION time and not merely at advertisement: a model can name a
+// tool it was never offered — hallucinated, carried over from a resumed
+// conversation seeded under a wider selection, or suggested by text inside a
+// tool result, since this node feeds file contents straight back to the model.
+//
+// The call is ANSWERED rather than dropped: every tool_call id needs a response
+// or the follow-up request is malformed for most providers. The content names the
+// tool so the model can pick one it actually has.
+func unboundRefusal(allowed map[string]bool, callID, name string) (llms.MessageContent, bool) {
+	if allowed[name] {
+		return llms.MessageContent{}, false
+	}
+	return llms.MessageContent{
+		Role: llms.ChatMessageTypeTool,
+		Parts: []llms.ContentPart{llms.ToolCallResponse{
+			ToolCallID: callID,
+			Name:       name,
+			Content: "error: the tool " + name + " is not bound on this node and was not called. " +
+				"Use only the tools you were given.",
+		}},
+	}, true
 }
 
 // selectBoundTools keeps the server tools whose names appear in the node's bound
