@@ -292,15 +292,8 @@ func mcpRunHandler(job sdkv1.Job) {
 }
 
 // unboundRefusal answers a tool call for a name this node never advertised,
-// reporting refused=true when it did so. It exists because the whitelist has to
-// hold at EXECUTION time and not merely at advertisement: a model can name a
-// tool it was never offered — hallucinated, carried over from a resumed
-// conversation seeded under a wider selection, or suggested by text inside a
-// tool result, since this node feeds file contents straight back to the model.
-//
-// The call is ANSWERED rather than dropped: every tool_call id needs a response
-// or the follow-up request is malformed for most providers. The content names the
-// tool so the model can pick one it actually has.
+// reporting refused=true when it did so. It answers rather than drops because
+// every tool_call id needs a response or the follow-up request is malformed.
 func unboundRefusal(allowed map[string]bool, callID, name string) (llms.MessageContent, bool) {
 	if allowed[name] {
 		return llms.MessageContent{}, false
