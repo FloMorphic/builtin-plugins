@@ -9,8 +9,11 @@
 //     model are the MCP server's tools rather than hand-declared outbound ports.
 //     THIS node runs the agentic loop — when the model asks for a tool it calls
 //     it on the MCP server, feeds the result back, and re-prompts, until the
-//     model answers with text. Each called tool is also routed as an outbound
-//     port (CmdNextFilter), mirroring the LLM node's tool routing.
+//     model answers with text. The tools are INTERNAL to that loop: they are not
+//     outbound ports and are never routed on. Routing by called tool belongs to
+//     the LLM node, whose bound functions ARE canvas ports — the MCP node
+//     derives no ports, so filtering them would prune its one plain edge and end
+//     the branch silently.
 //   - `call_tool` ("MCP Tool Only"): no LLM. Connect, call ONE named tool with
 //     the user-supplied arguments, and return its result.
 //

@@ -79,6 +79,17 @@ func mcpRunHandler(job sdkv1.Job) {
 		job.DoneWithError("no MCP tools available to bind")
 		return
 	}
+	// The binding has to hold at EXECUTION time, not just at advertisement.
+	// A model can name a tool it was never offered: hallucinated, carried over
+	// from a resumed conversation seeded under a different selection, or
+	// suggested by text inside a tool result — this node feeds file contents
+	// straight back to the model, so a file can ask it to call something. Only
+	// advertising a subset is a hint; this set is the boundary.
+	allowed := make(map[string]bool, len(bound))
+	for _, t := range bound {
+		allowed[t.Name] = true
+	}
+
 	tools := make([]llms.Tool, len(bound))
 	for i, t := range bound {
 		params := any(t.InputSchema)
@@ -210,7 +221,6 @@ func mcpRunHandler(job sdkv1.Job) {
 
 		// No tool call ⇒ this is the final answer.
 		if len(choice.ToolCalls) == 0 {
-			routeCalledTools(job, calledTools)
 			job.Done(map[string]any{
 				"reply":      choice.Content,
 				"turns":      turn + 1,
@@ -247,6 +257,24 @@ func mcpRunHandler(job sdkv1.Job) {
 				continue
 			}
 			name := tc.FunctionCall.Name
+			if !allowed[name] {
+				// Answer the call rather than dropping it: every tool_call id needs a
+				// response or the next request is malformed for most providers. The
+				// model is told why, so it can pick something it does have.
+				job.Progress(bump(), sdkv1.Frame{Title: "tool refused", Content: name + ": not bound on this node"})
+				messages = append(messages, llms.MessageContent{
+					Role: llms.ChatMessageTypeTool,
+					Parts: []llms.ContentPart{llms.ToolCallResponse{
+						ToolCallID: tc.ID,
+						Name:       name,
+						Content: "error: the tool " + name + " is not bound on this node and was not called. " +
+							"Use only the tools you were given.",
+					}},
+				})
+				continue
+			}
+			// Recorded only once the call is actually allowed, so tools_used reports
+			// what ran rather than what was asked for.
 			calledTools[name] = true
 			job.Progress(bump(), sdkv1.Frame{Title: "calling tool", Content: name})
 
@@ -271,7 +299,6 @@ func mcpRunHandler(job sdkv1.Job) {
 	}
 
 	// Hit the turn cap without the model settling on a text answer.
-	routeCalledTools(job, calledTools)
 	job.DoneWithError(fmt.Sprintf("reached max tool turns (%d) without a final answer", maxTurns))
 }
 
@@ -357,15 +384,6 @@ func flattenConversation(messages []llms.MessageContent, finalReply string) []ll
 	}
 	out = append(out, llm.ChatMessage{Role: "assistant", Content: finalReply})
 	return out
-}
-
-// routeCalledTools fires an outbound port per tool that was invoked, so the flow
-// can branch on which MCP tools ran — the same convention as the LLM node.
-func routeCalledTools(job sdkv1.Job, called map[string]bool) {
-	tags := keysOf(called)
-	if len(tags) > 0 {
-		job.CmdNextFilter(tags)
-	}
 }
 
 func keysOf(m map[string]bool) []string {
