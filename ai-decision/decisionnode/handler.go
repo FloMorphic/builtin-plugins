@@ -1,4 +1,4 @@
-package jevnode
+package decisionnode
 
 import (
 	"context"
@@ -14,7 +14,7 @@ func Register(p *sdkv1.Plugin) {
 	p.AddAction(sdkv1.Action{
 		Method:         "run",
 		Title:          "Run",
-		Description:    "Evaluate the state against typed questions on Jev (TypeSafe System One) and route by the answers",
+		Description:    "Evaluate the state (and any evidence) against typed questions on a System One decision model \u2014 hosted Jev or local Laya \u2014 and route by the answers",
 		RequestHandler: runHandler,
 	})
 }
@@ -56,8 +56,8 @@ func runHandler(job sdkv1.Job) {
 		return
 	}
 	cfg := req.Body.Settings
-	if strings.TrimSpace(cfg.AccessToken) == "" {
-		job.DoneWithError("missing required settings-profile fields: settings.access_token")
+	if err := validateSettings(cfg); err != nil {
+		job.DoneWithError(err.Error())
 		return
 	}
 	questions := req.Body.Questions
@@ -65,14 +65,22 @@ func runHandler(job sdkv1.Job) {
 		job.DoneWithError(err.Error())
 		return
 	}
+	if err := validateEvidence(req.Body.Evidence); err != nil {
+		job.DoneWithError(err.Error())
+		return
+	}
 	job.Progress(5, sdkv1.Frame{Title: "run", Content: "preparing state"})
 
-	// 1. Resolve the state template against the live flow context. Jev only
-	//    works on something to evaluate: a template that resolves to nothing is a
-	//    config mistake, not a decision to route on.
-	state := resolveState(job, req.Body.State)
-	if s, ok := state.(string); ok && strings.TrimSpace(s) == "" {
-		job.DoneWithError("empty state: the state template resolved to no content")
+	// 1. Resolve the templates against the live flow context and fold the
+	//    subject and the evidence rows into the one `state` value the API takes
+	//    (it has no separate evidence parameter). The model only works on
+	//    something to evaluate: nothing to decide ON is a config mistake, not a
+	//    decision to route on.
+	res := jobResolver(job)
+	evidence := resolveEvidence(res, req.Body.Evidence)
+	state := assembleState(resolveState(job, req.Body.State), evidence)
+	if isBlank(state) {
+		job.DoneWithError("empty state: the state template resolved to no content and no evidence was supplied")
 		return
 	}
 
@@ -85,7 +93,7 @@ func runHandler(job sdkv1.Job) {
 		Title:   "thinking",
 		Content: fmt.Sprintf("evaluating %d question(s) on %s", len(questions), model),
 	})
-	resp, err := callJev(context.Background(), cfg, buildRequest(cfg, state, questions))
+	resp, err := callDecision(context.Background(), cfg, buildRequest(res, cfg, state, questions))
 	if err != nil {
 		Exception(job, "provider_error", "provider error: "+err.Error(), map[string]any{
 			"model": model,

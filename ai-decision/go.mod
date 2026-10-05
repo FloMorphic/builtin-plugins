@@ -1,4 +1,4 @@
-module github.com/FloMorphic/builtin-plugins/jev
+module github.com/FloMorphic/builtin-plugins/ai-decision
 
 go 1.27
 

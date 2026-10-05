@@ -1,12 +1,26 @@
-package jevnode
+package decisionnode
 
-// JevSettings is the shape the frontend settings-profile must produce. Collect
-// these into a profile (e.g. "jev-config") and ship them in body.settings. Only
-// the access token is required; the model defaults to defaultModel and the base
-// URL to the service's own endpoint.
-type JevSettings struct {
-	AccessToken    string `json:"access_token"`    // bearer API key
-	Model          string `json:"model"`           // model id, e.g. "typesafe/jev-1.13"; empty ⇒ defaultModel
+// DecisionSettings is the shape the frontend settings-profile must produce.
+// Collect these into a profile (e.g. "jev-config", "laya-local") and ship them
+// in body.settings.
+//
+// The node speaks the System One wire protocol (POST /v1/systemone), which is
+// served both by TypeSafe's hosted Jev and by Laya, the open local-first
+// decision model — so which service answers is entirely a property of the
+// profile, not of the node:
+//
+//   - hosted Jev  : AccessToken only; URL and Model may stay empty (the
+//     defaults are the hosted endpoint and jev-latest).
+//   - local Laya  : URL pointing at the local server and the Model it serves;
+//     AccessToken may be empty, since a local endpoint usually has no key.
+//
+// Because a model id is only guessable for the hosted default, Model is
+// REQUIRED whenever URL names another endpoint (see validateSettings): sending
+// "jev-latest" to a Laya server would come back as a validation error from the
+// far side instead of a readable one from here.
+type DecisionSettings struct {
+	AccessToken    string `json:"access_token"`    // bearer API key; omitted from the request when empty (local endpoints)
+	Model          string `json:"model"`           // model id, e.g. "typesafe/jev-1.13"; empty ⇒ defaultModel (hosted only)
 	URL            string `json:"url"`             // optional custom *base* URL; empty ⇒ defaultBaseURL
 	TimeoutSeconds int    `json:"timeout_seconds"` // optional per-call timeout; ≤0 ⇒ defaultTimeout
 }
@@ -30,8 +44,24 @@ type Option struct {
 // Question is one typed question the node asks of the state. ID is the key the
 // answer comes back under and the prefix of every port tag this question
 // derives ("<id>.<option>"). Type selects the API question type: "choice",
-// "score" or "noul". Instructions is the evaluation prompt. Options are the
-// declared answers (see Option).
+// "score" or "noul". Options are the declared answers (see Option).
+//
+// Instructions is what to decide about the state, and the API accepts it in
+// either of two forms, so this field is typed `any`:
+//
+//   - a string — the plain question ("Which team should handle this?");
+//
+//   - a JSON object (or array) — the question in one field and the reference
+//     data it needs in the others, which the question then cites by BACKTICKED
+//     name, the same notation that points at a part of the state:
+//
+//     { "question": "Does this qualify for termination under `policy`?",
+//     "policy":   "{{$.kb.termination_policy}}" }
+//
+// Either form is a TEMPLATE: every string in it (at any depth, for the object
+// form) has its {{$.a.b}} tokens resolved against the live flow context before
+// the call — see resolveTemplateValue. The same is true of each Option's
+// Description, which is the model-facing criteria text.
 //
 // Route decides whether this question's options are outbound ports of the node
 // (nil/true) or the answer is data only (false). MinConfidence, when > 0, is a
@@ -41,7 +71,7 @@ type Option struct {
 type Question struct {
 	ID            string   `json:"id"`
 	Type          string   `json:"type"`
-	Instructions  string   `json:"instructions"`
+	Instructions  any      `json:"instructions"` // string | object | array — see above
 	Options       []Option `json:"options"`
 	Route         *bool    `json:"route,omitempty"`
 	MinConfidence float64  `json:"min_confidence,omitempty"`
@@ -54,14 +84,42 @@ func (q Question) routes() bool {
 	return q.Route == nil || *q.Route
 }
 
+// EvidenceItem is one chunk of reference material injected into the state —
+// the retrieval side of a RAG decision. Text is the chunk itself, a template
+// whose {{$.a.b}} tokens are resolved per run (so a retriever node upstream can
+// hand each chunk over by path), and Source is where it came from: a file name,
+// a URL, a row id. Source is optional but worth filling in, because it travels
+// with the chunk into the state and a question can then cite the chunk it means
+// by backticked path (`evidence[0].text`) and report which source decided it.
+//
+// The API has no separate evidence parameter — the request body is only
+// {model, state, questions} — so evidence is not a second input to the service:
+// assembleState folds these rows INTO the state object. Keep them few and
+// filtered: the state and all the questions share one context budget (~64k
+// tokens, with state plus the longest question inside ~32k), and accuracy falls
+// as the state fills with material the questions do not need.
+type EvidenceItem struct {
+	Source string `json:"source,omitempty"` // provenance: file, URL, row id — a template
+	Text   string `json:"text"`             // the chunk — a template
+}
+
 // RunBody is the body of the `run` action request (the inner `body` of the
-// envelope). State is the text template of the content to evaluate — it may
-// embed {{$...}} vars (see resolveState). Questions are the typed questions with
-// their declared answers.
+// envelope).
+//
+// State is the text template of the subject to evaluate — the case, the ticket,
+// the message — and may embed {{$...}} vars (see resolveState). Evidence is the
+// optional reference material that supports the decision (see EvidenceItem);
+// when any row is present the two are assembled into a single state object,
+// {"case": <state>, "evidence": [...]}, which is what the service receives.
+// With no evidence rows the state is sent exactly as before, so a body written
+// against the single-block shape keeps its behaviour.
+//
+// Questions are the typed questions with their declared answers.
 type RunBody struct {
-	Settings  JevSettings `json:"settings"`  // fed by the settings-profile
-	State     string      `json:"state"`     // content to evaluate; {{$.a.b}} tokens resolved per run
-	Questions []Question  `json:"questions"` // typed questions; routed ones derive outbound ports
+	Settings  DecisionSettings `json:"settings"`           // fed by the settings-profile
+	State     string           `json:"state"`              // the subject; {{$.a.b}} tokens resolved per run
+	Evidence  []EvidenceItem   `json:"evidence,omitempty"` // optional RAG chunks folded into the state
+	Questions []Question       `json:"questions"`          // typed questions; routed ones derive outbound ports
 }
 
 // Decision is one question's answer, reduced to what the flow needs: the top
@@ -96,9 +154,11 @@ type apiRequest struct {
 // a name→description map for choice, an ordered []string of level descriptions
 // for score, and a {"true": …, "false": …} map for noul (see buildCriteria).
 type apiQuestion struct {
-	Type         string `json:"type"`
-	Instructions string `json:"instructions"`
-	Criteria     any    `json:"criteria,omitempty"`
+	Type string `json:"type"`
+	// string | object | array, as the API documents it and as the node received
+	// it, with every template resolved (see resolveTemplateValue).
+	Instructions any `json:"instructions"`
+	Criteria     any `json:"criteria,omitempty"`
 }
 
 // apiResponse is the reply, decoded permissively because the service and the

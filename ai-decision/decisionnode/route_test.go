@@ -1,4 +1,4 @@
-package jevnode
+package decisionnode
 
 import (
 	"reflect"
@@ -44,7 +44,7 @@ func TestValidateQuestions(t *testing.T) {
 func TestBuildCriteria(t *testing.T) {
 	t.Run("choice is a name→description map, name as fallback", func(t *testing.T) {
 		q := Question{Type: typeChoice, Options: []Option{{Name: "billing", Description: "Payments"}, {Name: "sales"}}}
-		got := buildCriteria(q)
+		got := buildCriteria(identity, q)
 		want := map[string]string{"billing": "Payments", "sales": "sales"}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("got %v want %v", got, want)
@@ -52,17 +52,17 @@ func TestBuildCriteria(t *testing.T) {
 	})
 	t.Run("score is the ordered level descriptions", func(t *testing.T) {
 		q := Question{Type: typeScore, Options: []Option{{Name: "low", Description: "Calm"}, {Name: "high", Description: "Angry"}}}
-		got := buildCriteria(q)
+		got := buildCriteria(identity, q)
 		if !reflect.DeepEqual(got, []string{"Calm", "Angry"}) {
 			t.Fatalf("got %v", got)
 		}
 	})
 	t.Run("noul defaults, rows override descriptions", func(t *testing.T) {
-		if got := buildCriteria(Question{Type: typeNoul}); !reflect.DeepEqual(got, map[string]string{"true": "Yes", "false": "No"}) {
+		if got := buildCriteria(identity, Question{Type: typeNoul}); !reflect.DeepEqual(got, map[string]string{"true": "Yes", "false": "No"}) {
 			t.Fatalf("default got %v", got)
 		}
 		q := Question{Type: typeNoul, Options: []Option{{Name: noulYes, Description: "Time-sensitive"}}}
-		if got := buildCriteria(q); !reflect.DeepEqual(got, map[string]string{"true": "Time-sensitive", "false": "No"}) {
+		if got := buildCriteria(identity, q); !reflect.DeepEqual(got, map[string]string{"true": "Time-sensitive", "false": "No"}) {
 			t.Fatalf("override got %v", got)
 		}
 	})
@@ -131,5 +131,64 @@ func TestQuestionRoutesDefault(t *testing.T) {
 	}
 	if (Question{Route: &off}).routes() {
 		t.Fatal("route=false should not route")
+	}
+}
+
+func TestValidateInstructions(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		in      any
+		wantErr bool
+	}{
+		{"plain question", "which team?", false},
+		{"blank string", "   ", true},
+		{"structured object", map[string]any{"question": "q", "policy": "p"}, false},
+		{"empty object", map[string]any{}, true},
+		{"array form", []any{"q", "p"}, false},
+		{"empty array", []any{}, true},
+		{"missing", nil, true},
+		{"wrong type", 7, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if err := validateInstructions("q", c.in); (err != nil) != c.wantErr {
+				t.Fatalf("err=%v wantErr=%v", err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateEvidence(t *testing.T) {
+	if err := validateEvidence([]EvidenceItem{{Source: "a.pdf", Text: "x"}}); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if err := validateEvidence(nil); err != nil {
+		t.Fatalf("no rows is fine: %v", err)
+	}
+	if err := validateEvidence([]EvidenceItem{{Source: "a.pdf", Text: " "}}); err == nil {
+		t.Fatal("a row with no text only spends context budget; want error")
+	}
+}
+
+func TestBuildRequestResolvesQuestionTemplates(t *testing.T) {
+	// The gap this covers: before, instructions and criteria descriptions went
+	// to the wire exactly as typed, so a {{$.path}} in either reached the model
+	// as token text.
+	qs := []Question{{
+		ID:           "termination",
+		Type:         typeNoul,
+		Instructions: map[string]any{"question": "allowed under `policy`?", "policy": "notice"},
+		Options:      []Option{{Name: noulYes, Description: "it is"}},
+	}}
+	req := buildRequest(upper, DecisionSettings{Model: "m"}, "state", qs)
+	got := req.Questions["termination"]
+	wantInstr := map[string]any{"question": "ALLOWED UNDER `POLICY`?", "policy": "NOTICE"}
+	if !reflect.DeepEqual(got.Instructions, wantInstr) {
+		t.Fatalf("instructions %v want %v", got.Instructions, wantInstr)
+	}
+	if crit := got.Criteria.(map[string]string); crit["true"] != "IT IS" {
+		t.Fatalf("criteria not resolved: %v", crit)
+	}
+	if req.State != "state" {
+		t.Fatalf("state should arrive already assembled: %v", req.State)
 	}
 }

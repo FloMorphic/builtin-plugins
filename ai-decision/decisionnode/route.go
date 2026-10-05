@@ -1,4 +1,4 @@
-package jevnode
+package decisionnode
 
 import (
 	"fmt"
@@ -59,6 +59,46 @@ func noulName(name string) string {
 	return ""
 }
 
+// validateInstructions accepts either form the API documents — a plain string
+// question, or a structured object/array that carries the question in one field
+// and its reference data in the others — and rejects an empty one of either.
+// The emptiness check runs on the TEMPLATE, before resolution: an unresolvable
+// {{$.path}} is left in place by design, so a question can never resolve to
+// nothing, and a blank here is a drawer the designer did not finish.
+func validateInstructions(id string, v any) error {
+	switch t := v.(type) {
+	case string:
+		if strings.TrimSpace(t) == "" {
+			return fmt.Errorf("question %q has no instructions", id)
+		}
+	case map[string]any:
+		if len(t) == 0 {
+			return fmt.Errorf("question %q has empty instructions", id)
+		}
+	case []any:
+		if len(t) == 0 {
+			return fmt.Errorf("question %q has empty instructions", id)
+		}
+	case nil:
+		return fmt.Errorf("question %q has no instructions", id)
+	default:
+		return fmt.Errorf("question %q: instructions must be a string, an object or an array", id)
+	}
+	return nil
+}
+
+// validateEvidence checks the evidence rows the way the API would see them
+// once assembleState has folded them into the state: every row has to carry
+// text, since a row that contributes nothing only spends context budget.
+func validateEvidence(rows []EvidenceItem) error {
+	for i, r := range rows {
+		if strings.TrimSpace(r.Text) == "" {
+			return fmt.Errorf("evidence row #%d has no text", i+1)
+		}
+	}
+	return nil
+}
+
 // validateQuestions checks every question's shape the way the API will, so a
 // config mistake fails here with a readable reason instead of as a 422. Ids
 // must be non-empty and unique (they key the reply and prefix the tags); option
@@ -80,8 +120,8 @@ func validateQuestions(qs []Question) error {
 		}
 		seen[q.ID] = struct{}{}
 		q.Type = normalizeType(q.Type)
-		if strings.TrimSpace(q.Instructions) == "" {
-			return fmt.Errorf("question %q has no instructions", q.ID)
+		if err := validateInstructions(q.ID, q.Instructions); err != nil {
+			return err
 		}
 		if q.MinConfidence < 0 || q.MinConfidence > 1 {
 			return fmt.Errorf("question %q: min_confidence must be within 0..1", q.ID)
@@ -125,27 +165,30 @@ func validateQuestions(qs []Question) error {
 }
 
 // buildCriteria shapes a question's declared answers into the API's criteria
-// for its type. An empty description falls back to the option's name so the
-// model always has something to score against.
-func buildCriteria(q Question) any {
+// for its type. Every description is model-facing text, so it is a template
+// like the instructions are: res resolves its {{$.a.b}} tokens, which is how a
+// criterion can quote a threshold or a policy held in the flow context. An
+// empty description falls back to the option's name so the model always has
+// something to score against.
+func buildCriteria(res resolver, q Question) any {
 	switch q.Type {
 	case typeChoice:
 		m := make(map[string]string, len(q.Options))
 		for _, o := range q.Options {
-			m[o.Name] = descOrName(o)
+			m[o.Name] = res(descOrName(o))
 		}
 		return m
 	case typeScore:
 		levels := make([]string, len(q.Options))
 		for i, o := range q.Options {
-			levels[i] = descOrName(o)
+			levels[i] = res(descOrName(o))
 		}
 		return levels
 	case typeNoul:
 		m := map[string]string{"true": "Yes", "false": "No"}
 		for _, o := range q.Options {
 			if d := strings.TrimSpace(o.Description); d != "" {
-				m[map[string]string{noulYes: "true", noulNo: "false"}[o.Name]] = d
+				m[map[string]string{noulYes: "true", noulNo: "false"}[o.Name]] = res(d)
 			}
 		}
 		return m
@@ -160,12 +203,19 @@ func descOrName(o Option) string {
 	return o.Name
 }
 
-// buildRequest assembles the wire request from the resolved state and the
-// validated questions.
-func buildRequest(cfg JevSettings, state any, qs []Question) apiRequest {
+// buildRequest assembles the wire request from the already-assembled state and
+// the validated questions. The questions are templates too — res resolves the
+// instructions (at any depth, for the structured form) and every criteria
+// description — so a question reaches the service with its flow data in it
+// rather than with the token text the designer typed.
+func buildRequest(res resolver, cfg DecisionSettings, state any, qs []Question) apiRequest {
 	req := apiRequest{State: state, Model: modelOf(cfg), Questions: make(map[string]apiQuestion, len(qs))}
 	for _, q := range qs {
-		req.Questions[q.ID] = apiQuestion{Type: q.Type, Instructions: q.Instructions, Criteria: buildCriteria(q)}
+		req.Questions[q.ID] = apiQuestion{
+			Type:         q.Type,
+			Instructions: resolveTemplateValue(res, q.Instructions),
+			Criteria:     buildCriteria(res, q),
+		}
 	}
 	return req
 }

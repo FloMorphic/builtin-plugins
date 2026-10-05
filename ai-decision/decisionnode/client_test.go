@@ -1,4 +1,4 @@
-package jevnode
+package decisionnode
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"github.com/bytedance/sonic"
 )
 
-func TestCallJev(t *testing.T) {
+func TestCallDecision(t *testing.T) {
 	t.Run("posts the request shape and decodes the answers", func(t *testing.T) {
 		var got apiRequest
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -29,9 +29,9 @@ func TestCallJev(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		cfg := JevSettings{AccessToken: "k3y", URL: srv.URL + "/"}
+		cfg := DecisionSettings{AccessToken: "k3y", URL: srv.URL + "/"}
 		q := Question{ID: "category", Type: typeChoice, Instructions: "which team?", Options: []Option{{Name: "billing", Description: "Payments"}, {Name: "sales"}}}
-		resp, err := callJev(context.Background(), cfg, buildRequest(cfg, "duplicate charge", []Question{q}))
+		resp, err := callDecision(context.Background(), cfg, buildRequest(identity, cfg, "duplicate charge", []Question{q}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -56,7 +56,7 @@ func TestCallJev(t *testing.T) {
 			_, _ = w.Write([]byte(`{"model":"jev","answers":{"q":{"type":"noul","noul":0.6}}}`))
 		}))
 		defer srv.Close()
-		_, err := callJev(context.Background(), JevSettings{AccessToken: "k", URL: srv.URL}, apiRequest{})
+		_, err := callDecision(context.Background(), DecisionSettings{AccessToken: "k", URL: srv.URL}, apiRequest{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -72,7 +72,7 @@ func TestCallJev(t *testing.T) {
 			http.Error(w, `{"error":"Missing or invalid API key"}`, http.StatusUnauthorized)
 		}))
 		defer srv.Close()
-		_, err := callJev(context.Background(), JevSettings{AccessToken: "bad", URL: srv.URL}, apiRequest{})
+		_, err := callDecision(context.Background(), DecisionSettings{AccessToken: "bad", URL: srv.URL}, apiRequest{})
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -91,7 +91,7 @@ func TestCallJev(t *testing.T) {
 			http.Error(w, "overloaded", 529)
 		}))
 		defer srv.Close()
-		_, err := callJev(context.Background(), JevSettings{AccessToken: "k", URL: srv.URL}, apiRequest{})
+		_, err := callDecision(context.Background(), DecisionSettings{AccessToken: "k", URL: srv.URL}, apiRequest{})
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -105,7 +105,7 @@ func TestCallJev(t *testing.T) {
 // creditsUsed}} while the published reference shows it flat. Both have to land
 // on the same normalized reply, and a non-zero `code` — a failure the service
 // reports with HTTP 200 — must not pass as an answer.
-func TestCallJevEnvelope(t *testing.T) {
+func TestCallDecisionEnvelope(t *testing.T) {
 	serve := func(body string) *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if ua := r.Header.Get("User-Agent"); ua != userAgent {
@@ -118,7 +118,7 @@ func TestCallJevEnvelope(t *testing.T) {
 	t.Run("enveloped reply is unwrapped, credits carried", func(t *testing.T) {
 		srv := serve(`{"code":0,"message":"ok","data":{"result":{"answers":{"urgency":{"type":"noul","noul":0.61}},"usage":{"input_tokens":311,"output_tokens":21},"elapsedMs":1801},"creditsUsed":1}}`)
 		defer srv.Close()
-		got, err := callJev(context.Background(), JevSettings{AccessToken: "k", URL: srv.URL}, apiRequest{})
+		got, err := callDecision(context.Background(), DecisionSettings{AccessToken: "k", URL: srv.URL}, apiRequest{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -136,7 +136,7 @@ func TestCallJevEnvelope(t *testing.T) {
 	t.Run("flat reply still works", func(t *testing.T) {
 		srv := serve(`{"model":"jev-1.13.0","answers":{"urgency":{"type":"noul","noul":0.2}},"usage":{"input_tokens":10}}`)
 		defer srv.Close()
-		got, err := callJev(context.Background(), JevSettings{AccessToken: "k", URL: srv.URL}, apiRequest{})
+		got, err := callDecision(context.Background(), DecisionSettings{AccessToken: "k", URL: srv.URL}, apiRequest{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -148,7 +148,7 @@ func TestCallJevEnvelope(t *testing.T) {
 	t.Run("non-zero code on HTTP 200 is an error", func(t *testing.T) {
 		srv := serve(`{"code":4001,"message":"insufficient credits","data":null}`)
 		defer srv.Close()
-		_, err := callJev(context.Background(), JevSettings{AccessToken: "k", URL: srv.URL}, apiRequest{})
+		_, err := callDecision(context.Background(), DecisionSettings{AccessToken: "k", URL: srv.URL}, apiRequest{})
 		if err == nil || !strings.Contains(err.Error(), "insufficient credits") {
 			t.Fatalf("err = %v", err)
 		}
@@ -157,7 +157,7 @@ func TestCallJevEnvelope(t *testing.T) {
 	t.Run("an empty answer set is an error, not a silent pass", func(t *testing.T) {
 		srv := serve(`{"code":0,"message":"ok","data":{"result":{"answers":{}},"creditsUsed":0}}`)
 		defer srv.Close()
-		if _, err := callJev(context.Background(), JevSettings{AccessToken: "k", URL: srv.URL}, apiRequest{}); err == nil {
+		if _, err := callDecision(context.Background(), DecisionSettings{AccessToken: "k", URL: srv.URL}, apiRequest{}); err == nil {
 			t.Fatal("expected error")
 		}
 	})
@@ -166,10 +166,60 @@ func TestCallJevEnvelope(t *testing.T) {
 // The default endpoint is the host that actually serves the API, and a profile
 // URL overrides it.
 func TestBaseURL(t *testing.T) {
-	if got := baseURL(JevSettings{}); got != "https://thejevai.com" {
+	if got := baseURL(DecisionSettings{}); got != "https://thejevai.com" {
 		t.Errorf("default baseURL = %q", got)
 	}
-	if got := baseURL(JevSettings{URL: "https://proxy.internal/"}); got != "https://proxy.internal" {
+	if got := baseURL(DecisionSettings{URL: "https://proxy.internal/"}); got != "https://proxy.internal" {
 		t.Errorf("override baseURL = %q", got)
+	}
+}
+
+func TestValidateSettings(t *testing.T) {
+	// The rule follows the URL, because that is what tells the two deployments
+	// apart: a key is required against the hosted service and pointless against
+	// a local one, while "jev-latest" means nothing to anything but the host.
+	t.Run("hosted needs a key", func(t *testing.T) {
+		if err := validateSettings(DecisionSettings{}); err == nil {
+			t.Fatal("want an error naming access_token")
+		}
+		if err := validateSettings(DecisionSettings{AccessToken: "k"}); err != nil {
+			t.Fatalf("hosted with a key: %v", err)
+		}
+	})
+	t.Run("hosted by explicit url still needs a key", func(t *testing.T) {
+		if err := validateSettings(DecisionSettings{URL: defaultBaseURL + "/"}); err == nil {
+			t.Fatal("want an error: this is still the hosted endpoint")
+		}
+	})
+	t.Run("a local endpoint needs a model, not a key", func(t *testing.T) {
+		local := DecisionSettings{URL: "http://127.0.0.1:8080"}
+		if err := validateSettings(local); err == nil {
+			t.Fatal("want an error naming model")
+		}
+		local.Model = "laya-base"
+		if err := validateSettings(local); err != nil {
+			t.Fatalf("local Laya profile should be valid: %v", err)
+		}
+	})
+}
+
+func TestAuthorizationOmittedWithoutAKey(t *testing.T) {
+	// An empty bearer is worse than no header: some servers reject the
+	// malformed credential instead of treating the call as unauthenticated.
+	var gotAuth string
+	var had bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth, had = r.Header.Get("Authorization"), len(r.Header.Values("Authorization")) > 0
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"laya","answers":{"q":{"type":"noul","noul":0.9}}}`))
+	}))
+	defer srv.Close()
+
+	cfg := DecisionSettings{URL: srv.URL, Model: "laya-base"}
+	if _, err := callDecision(context.Background(), cfg, apiRequest{State: "x", Model: "laya-base"}); err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if had || gotAuth != "" {
+		t.Fatalf("Authorization sent with no key: %q", gotAuth)
 	}
 }
