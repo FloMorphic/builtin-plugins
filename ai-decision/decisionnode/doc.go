@@ -24,8 +24,11 @@
 // four parts:
 //
 //   - settings  : the *settings-profile* the frontend ships per request — the
-//     endpoint, the API key, the model id and a timeout. Its shape is
-//     DecisionSettings.
+//     endpoint, the API key, the model id, a timeout and the retry budget. Its
+//     shape is DecisionSettings. Only 429 and 529 are retried, waiting for
+//     Retry-After when the service sends it; max_retries is a pointer so an
+//     explicit 0 ("decide once") differs from an absent field ("take the
+//     default").
 //
 //   - state     : the subject to decide on — the case, the ticket, the message.
 //     A text template that may embed {{$.a.b}} variables resolved against the

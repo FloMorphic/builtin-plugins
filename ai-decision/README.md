@@ -51,7 +51,8 @@ decisionnode/  all node functionality
     "access_token": "…",              // required for the hosted endpoint; empty for a local model
     "model": "jev-latest",            // defaults to jev-latest on the hosted endpoint; REQUIRED for any other url
     "url": "",                        // optional base URL — a local Laya, a proxy, a private deployment
-    "timeout_seconds": 30             // optional
+    "timeout_seconds": 30,            // optional
+    "max_retries": 2                  // optional; omit for the default (2), 0 to never retry
   },
   "state": "Ticket from {{$.ticket.customer}}: {{$.ticket.text}}",
   "evidence": [                       // optional — the retrieval side of the decision
@@ -139,6 +140,31 @@ data read the flow context.
 
 An empty description falls back to the name.
 
+### Retrying
+
+Only the two statuses the service asks callers to back off on are retried — 429
+(rate limit) and 529 (overloaded). A 401, a 422 or a malformed reply is returned
+at once, because a second identical request cannot fix any of them.
+
+How reliable a particular endpoint is — a shared key against a rate-limited
+hosted service, a local Laya with nothing in front of it — is a property of the
+connection rather than of the decision, so the budget lives in the profile, as
+it does on the [LLM](../llm) and [HTTP](../http) nodes. `max_retries` is how
+many *further* attempts a failed call gets:
+
+| `max_retries` | Behaviour |
+| ------------- | --------- |
+| absent | the default, 2 further attempts |
+| `0` | decide once; a transient failure routes `_exception` |
+| `n` | n further attempts |
+
+Between attempts the node waits for whatever `Retry-After` asked for (both
+documented forms — a delay in seconds, or an HTTP date), and otherwise backs off
+exponentially from 500 ms. Either way the wait is capped at 8 s: a decision node
+sits on the hot path, and one that parks a flow for minutes is not helping it.
+Each wait is reported as a progress frame, so a retrying node reads as waiting
+rather than as hung.
+
 ### Endpoint & reply shape
 
 The node posts to `<base>/v1/systemone` with `Authorization: Bearer
@@ -146,10 +172,17 @@ The node posts to `<base>/v1/systemone` with `Authorization: Bearer
 `https://thejevai.com`. Four notes, all learned against the live service rather
 than from the reference:
 
-- `docs.typesafe.ai` documents `https://api.typesafe.ai`, which answers `401` to
-  every key. The host that serves the hosted API is `thejevai.com`, and it sits
-  behind a CDN that screens unfamiliar clients — the node sends an explicit
-  `User-Agent`.
+- The default host is **not** the documented one, and the difference is real.
+  `docs.typesafe.ai` documents `https://api.typesafe.ai/v1/systemone`, which is
+  live and whose documented reply is **flat** (`{model, answers, usage}`).
+  `thejevai.com` — the gateway these keys are issued for, and the one every run
+  behind this node went to — answers with an **envelope**
+  (`{code, message, data:{result, creditsUsed}}`) that the reference never
+  mentions, and that is where `credits_used` and `elapsed_ms` come from. Two
+  gateways in front of the same model: the default stays on the one the keys
+  belong to, `reply()` decodes both, and a profile can point `url` at either.
+  Both sit behind a CDN that screens unfamiliar clients, so the node sends an
+  explicit `User-Agent`.
 - The live reply is **wrapped**: `{"code":0,"message":"ok","data":{"result":{…},"creditsUsed":1}}`,
   while the reference shows the answer document flat at the top level. The node
   decodes both (see `apiResponse.reply`), treats a non-zero `code` on an HTTP 200

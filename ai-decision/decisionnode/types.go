@@ -23,6 +23,20 @@ type DecisionSettings struct {
 	Model          string `json:"model"`           // model id, e.g. "typesafe/jev-1.13"; empty ⇒ defaultModel (hosted only)
 	URL            string `json:"url"`             // optional custom *base* URL; empty ⇒ defaultBaseURL
 	TimeoutSeconds int    `json:"timeout_seconds"` // optional per-call timeout; ≤0 ⇒ defaultTimeout
+
+	// MaxRetries is how many FURTHER attempts a failed call gets, and only for
+	// the two statuses the service asks callers to back off on (429, 529).
+	// How reliable a particular endpoint is — a shared key against a
+	// rate-limited hosted service, a local Laya with nothing in front of it —
+	// is a property of the connection rather than of the decision, which is
+	// why it belongs to the profile, exactly as it does on the LLM node.
+	//
+	// It is a POINTER so that "never retry" and "unset" are different things:
+	// nil (absent from the profile) takes DefaultMaxRetries, and an explicit 0
+	// turns retrying off. An int could not express both, which would leave a
+	// settings form with no way to say "decide once, or not at all" — a real
+	// choice for a flow where a late decision is worse than no decision.
+	MaxRetries *int `json:"max_retries"`
 }
 
 // Option is one declared answer of a question, as collected by the settings

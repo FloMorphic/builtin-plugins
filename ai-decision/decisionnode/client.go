@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,13 +14,24 @@ import (
 )
 
 const (
-	// The hosted service's own host, and the node's default. docs.typesafe.ai
-	// documents api.typesafe.ai, which answers 401 to every key — thejevai.com
-	// is the endpoint that serves the System One API. A profile points `url`
-	// elsewhere to reach any other server speaking the same protocol: a local
-	// Laya (the open, local-first System One model, which serves this same
-	// endpoint with Jev-shaped choice/score/noul answers), a proxy, a private
-	// deployment.
+	// The node's default host.
+	//
+	// Note this is NOT the host the vendor reference documents. docs.typesafe.ai
+	// documents https://api.typesafe.ai/v1/systemone, and that host is live: it
+	// answers with a structured auth error and an x-typesafe-request-id, and its
+	// documented reply shape is FLAT ({model, answers, usage}). thejevai.com —
+	// the host our keys are issued for, and the one every run in this node's
+	// tests went to — instead answers with an ENVELOPE ({code, message,
+	// data:{result, creditsUsed}}) that appears nowhere in the reference, which
+	// is where credits_used and elapsed_ms come from.
+	//
+	// Two different gateways in front of the same model, in other words, so
+	// which one a key works against is not something this node can assume. The
+	// default stays on the gateway the keys belong to, apiResponse.reply()
+	// decodes both shapes, and a profile points `url` at whichever endpoint it
+	// has: api.typesafe.ai, a local Laya (the open, local-first System One
+	// model, serving this same path with Jev-shaped answers), a proxy, a
+	// private deployment.
 	defaultBaseURL = "https://thejevai.com"
 	// The hosted service's documented alias, used only when the profile talks
 	// to defaultBaseURL (validateSettings requires an explicit model for any
@@ -34,12 +46,22 @@ const (
 	// it, which is why this node is not bound to either.
 	endpointPath = "/v1/systemone"
 
-	// The API asks callers to back off on 429 (rate limit) and 529 (overloaded).
-	// A decision node is on the hot path of a flow, so the retry budget is kept
-	// short: three attempts, ~0.5s → 1s → 2s apart, then the failure routes
-	// `_exception` and the flow decides.
-	maxAttempts  = 3
-	retryBackoff = 500 * time.Millisecond
+	// The API asks callers to back off on 429 (rate limit) and 529 (overloaded),
+	// and documents no other retryable status. A decision node sits on the hot
+	// path of a flow, so the default budget is deliberately small — two further
+	// attempts, ~0.5s then 1s apart — after which the failure routes
+	// `_exception` and the flow decides what to do about it.
+	//
+	// DefaultMaxRetries is what a profile that never mentions retrying gets. A
+	// profile can raise it for a rate-limited key, or set it to 0 for a flow
+	// where a late decision is worse than no decision.
+	DefaultMaxRetries = 2
+	retryBackoff      = 500 * time.Millisecond
+
+	// maxBackoff caps one wait. The service may ask for longer through
+	// Retry-After; a decision node that parks a flow for minutes is not doing
+	// it a favour, so the ask is honoured only up to this.
+	maxBackoff = 8 * time.Second
 
 	// How much of an error reply body is quoted back in the failure reason.
 	errBodyLimit = 300
@@ -102,34 +124,105 @@ func timeoutOf(cfg DecisionSettings) time.Duration {
 	return defaultTimeout
 }
 
+// retriesOf returns how many FURTHER attempts a failed call gets. The field is
+// a pointer so that "never retry" and "unset" are different answers: nil takes
+// the default, an explicit 0 turns retrying off.
+func retriesOf(cfg DecisionSettings) int {
+	if cfg.MaxRetries == nil {
+		return DefaultMaxRetries
+	}
+	if *cfg.MaxRetries < 0 {
+		return 0
+	}
+	return *cfg.MaxRetries
+}
+
+// waitFor is how long to hold before the next attempt: what the service asked
+// for through Retry-After when it said anything, otherwise an exponential
+// backoff, and never longer than maxBackoff.
+func waitFor(attempt int, hint time.Duration) time.Duration {
+	wait := hint
+	if wait <= 0 {
+		// Bound the shift before shifting: a profile may raise the retry count,
+		// and `retryBackoff << 98` overflows to zero — which would turn the
+		// backoff into a hot loop against a service that just asked for room.
+		shift := attempt - 1
+		if shift > 10 {
+			shift = 10 // 500ms << 10 = 512s, already far past maxBackoff
+		}
+		if shift < 0 {
+			shift = 0
+		}
+		wait = retryBackoff << shift
+	}
+	if wait > maxBackoff {
+		wait = maxBackoff
+	}
+	return wait
+}
+
+// retryAfter reads the Retry-After header, which the service may send with a
+// 429. Both documented forms are accepted: a delay in seconds, or an HTTP date.
+func retryAfter(h http.Header) time.Duration {
+	v := strings.TrimSpace(h.Get("Retry-After"))
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs < 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if when, err := http.ParseTime(v); err == nil {
+		if d := time.Until(when); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
 // callDecision POSTs one System One request and decodes the reply. Transient
-// statuses (429, 529) are retried with a bounded exponential backoff; any other
+// statuses (429, 529) are retried, as many times as the profile allows, waiting
+// for whatever the service asked for or an exponential backoff; any other
 // non-2xx status is returned at once with the status and a slice of the body so
 // the exception branch can see what the API objected to (a 422 names the
 // question that failed validation).
-func callDecision(ctx context.Context, cfg DecisionSettings, req apiRequest) (reply, error) {
+//
+// `notify` is called before each wait so the canvas shows the backoff rather
+// than the node going quiet — with retries raised on a rate-limited key, a
+// silent node is easy to mistake for a hang.
+func callDecision(ctx context.Context, cfg DecisionSettings, req apiRequest, notify func(string)) (reply, error) {
 	payload, err := sonic.Marshal(req)
 	if err != nil {
 		return reply{}, fmt.Errorf("encode request: %w", err)
 	}
 	client := &http.Client{Timeout: timeoutOf(cfg)}
 	url := baseURL(cfg) + endpointPath
+	retries := retriesOf(cfg)
 
-	var lastErr error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if attempt > 1 {
-			wait := retryBackoff << (attempt - 2)
+	var (
+		lastErr  error
+		lastHint time.Duration // what the service asked for, if it said anything
+	)
+	for attempt := 0; attempt <= retries; attempt++ {
+		if attempt > 0 {
+			wait := waitFor(attempt, lastHint)
+			if notify != nil {
+				notify(fmt.Sprintf("provider busy, retrying in %s (attempt %d of %d)",
+					wait.Round(100*time.Millisecond), attempt+1, retries+1))
+			}
 			select {
 			case <-time.After(wait):
 			case <-ctx.Done():
 				return reply{}, ctx.Err()
 			}
 		}
-		resp, retry, err := postOnce(ctx, client, url, cfg.AccessToken, payload)
+		resp, hint, retry, err := postOnce(ctx, client, url, cfg.AccessToken, payload)
 		if err == nil {
 			return resp, nil
 		}
-		lastErr = err
+		lastErr, lastHint = err, hint
 		if !retry {
 			break
 		}
@@ -139,10 +232,10 @@ func callDecision(ctx context.Context, cfg DecisionSettings, req apiRequest) (re
 
 // postOnce performs a single attempt. The retry flag tells the caller whether
 // the failure is one the API asks to be retried (rate limit / overload).
-func postOnce(ctx context.Context, client *http.Client, url, token string, payload []byte) (reply, bool, error) {
+func postOnce(ctx context.Context, client *http.Client, url, token string, payload []byte) (reply, time.Duration, bool, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
-		return reply{}, false, err
+		return reply{}, 0, false, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
@@ -155,33 +248,33 @@ func postOnce(ctx context.Context, client *http.Client, url, token string, paylo
 
 	res, err := client.Do(httpReq)
 	if err != nil {
-		return reply{}, false, err
+		return reply{}, 0, false, err
 	}
 	defer res.Body.Close()
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		return reply{}, false, fmt.Errorf("read reply: %w", err)
+		return reply{}, 0, false, fmt.Errorf("read reply: %w", err)
 	}
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		retry := res.StatusCode == http.StatusTooManyRequests || res.StatusCode == 529
-		return reply{}, retry, fmt.Errorf("decision api %s: %s", res.Status, snippet(body))
+		return reply{}, retryAfter(res.Header), retry, fmt.Errorf("decision api %s: %s", res.Status, snippet(body))
 	}
 
 	var out apiResponse
 	if err := sonic.Unmarshal(body, &out); err != nil {
-		return reply{}, false, fmt.Errorf("decode reply: %w (%s)", err, snippet(body))
+		return reply{}, 0, false, fmt.Errorf("decode reply: %w (%s)", err, snippet(body))
 	}
 	// The envelope carries its own status: a non-zero `code` is a failure the
 	// service reported with HTTP 200, so it must not pass as an answer.
 	if out.Code != 0 {
-		return reply{}, false, fmt.Errorf("decision api code %d: %s", out.Code, out.Message)
+		return reply{}, 0, false, fmt.Errorf("decision api code %d: %s", out.Code, out.Message)
 	}
 	r := out.reply()
 	if len(r.Answers) == 0 {
-		return reply{}, false, fmt.Errorf("decision api returned no answers (%s)", snippet(body))
+		return reply{}, 0, false, fmt.Errorf("decision api returned no answers (%s)", snippet(body))
 	}
-	return r, false, nil
+	return r, 0, false, nil
 }
 
 // snippet trims a reply body to a single-line excerpt for an error message.

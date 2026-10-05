@@ -98,7 +98,7 @@ func TestEvidenceReachesTheServiceEndToEnd(t *testing.T) {
 		"customer": res("{{$.ticket.customer}}"),
 		"problem":  "Early contract termination",
 	}, evidence)
-	resp, err := callDecision(context.Background(), cfg, buildRequest(res, cfg, state, questions))
+	resp, err := callDecision(context.Background(), cfg, buildRequest(res, cfg, state, questions), nil)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}

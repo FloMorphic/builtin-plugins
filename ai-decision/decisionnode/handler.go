@@ -93,7 +93,8 @@ func runHandler(job sdkv1.Job) {
 		Title:   "thinking",
 		Content: fmt.Sprintf("evaluating %d question(s) on %s", len(questions), model),
 	})
-	resp, err := callDecision(context.Background(), cfg, buildRequest(res, cfg, state, questions))
+	resp, err := callDecision(context.Background(), cfg, buildRequest(res, cfg, state, questions),
+		func(msg string) { job.Progress(20, sdkv1.Frame{Title: "waiting", Content: msg}) })
 	if err != nil {
 		Exception(job, "provider_error", "provider error: "+err.Error(), map[string]any{
 			"model": model,
