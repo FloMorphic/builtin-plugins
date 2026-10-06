@@ -14,25 +14,25 @@ import (
 )
 
 const (
-	// The node's default host.
+	// The node's default host: TypeSafe's own, first-party API, as the vendor
+	// reference documents it.
 	//
-	// Note this is NOT the host the vendor reference documents. docs.typesafe.ai
-	// documents https://api.typesafe.ai/v1/systemone, and that host is live: it
-	// answers with a structured auth error and an x-typesafe-request-id, and its
-	// documented reply shape is FLAT ({model, answers, usage}). thejevai.com —
-	// the host our keys are issued for, and the one every run in this node's
-	// tests went to — instead answers with an ENVELOPE ({code, message,
-	// data:{result, creditsUsed}}) that appears nowhere in the reference, which
-	// is where credits_used and elapsed_ms come from.
+	// It is deliberately NOT thejevai.com, which an earlier version of this
+	// node defaulted to. That host is a third-party AGGREGATOR — its catalogue
+	// spans several vendors (typesafe/jev, convaiinnovations/laya,
+	// cloudflare/clef, perplexity/pplx-decider, …), it bills in credits where
+	// TypeSafe bills per input token, and it answers with an envelope
+	// ({code, message, data:{result, creditsUsed}}) that appears nowhere in the
+	// reference. Useful, and the only way to reach several of those models
+	// behind one key — but a workflow product should not route a customer's
+	// state through an unaffiliated third party unless someone chose to, so it
+	// is a `url` a profile opts into rather than the default.
 	//
-	// Two different gateways in front of the same model, in other words, so
-	// which one a key works against is not something this node can assume. The
-	// default stays on the gateway the keys belong to, apiResponse.reply()
-	// decodes both shapes, and a profile points `url` at whichever endpoint it
-	// has: api.typesafe.ai, a local Laya (the open, local-first System One
-	// model, serving this same path with Jev-shaped answers), a proxy, a
-	// private deployment.
-	defaultBaseURL = "https://thejevai.com"
+	// Keys are not interchangeable between the two: an aggregator key will not
+	// authenticate here, and a TypeSafe key (console.typesafe.ai) will not
+	// authenticate there. apiResponse.reply() decodes both reply shapes, so the
+	// only thing a profile has to get right is the pair of url and key.
+	defaultBaseURL = "https://api.typesafe.ai"
 	// The hosted service's documented alias, used only when the profile talks
 	// to defaultBaseURL (validateSettings requires an explicit model for any
 	// other endpoint, since this alias means nothing there). The hosted service

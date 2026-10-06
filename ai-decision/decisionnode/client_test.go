@@ -167,7 +167,7 @@ func TestCallDecisionEnvelope(t *testing.T) {
 // The default endpoint is the host that actually serves the API, and a profile
 // URL overrides it.
 func TestBaseURL(t *testing.T) {
-	if got := baseURL(DecisionSettings{}); got != "https://thejevai.com" {
+	if got := baseURL(DecisionSettings{}); got != "https://api.typesafe.ai" {
 		t.Errorf("default baseURL = %q", got)
 	}
 	if got := baseURL(DecisionSettings{URL: "https://proxy.internal/"}); got != "https://proxy.internal" {

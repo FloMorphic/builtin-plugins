@@ -8,8 +8,17 @@ The node speaks one protocol, `POST /v1/systemone`, and two models serve it:
 
 | Model | Where | In the profile |
 | ----- | ----- | -------------- |
-| [Jev](https://docs.typesafe.ai/concepts/system-one) (TypeSafe) | hosted | `access_token`; `url` and `model` may stay empty |
+| [Jev](https://docs.typesafe.ai/concepts/system-one) (TypeSafe) | hosted, first-party — the default | `access_token` from [console.typesafe.ai](https://console.typesafe.ai); `url` and `model` may stay empty |
 | [Laya](https://github.com/receptron/laya) (Convai, Apache-2.0) | local / self-hosted | `url` + `model`; usually no key at all |
+| Either, plus other deciders | a third-party aggregator (e.g. `thejevai.com`) | its own `access_token` **and** its `url`; `model` is vendor-prefixed (`typesafe/jev-1.13`, `convaiinnovations/laya`) |
+
+An aggregator is a legitimate third option — one key reaching several deciders —
+but it is not the default: a workflow product should not route a customer's
+state through an unaffiliated third party unless someone chose to. Keys are not
+interchangeable between hosts, and the reply shapes differ (the aggregator wraps
+the answer document in an envelope and bills in credits; TypeSafe returns it flat
+and bills per input token). The node decodes both, so a profile only has to pair
+the right `url` with the right key.
 
 Which one answers is a property of the settings profile, not of the node — the
 request and reply shapes are the same. That is why this node is named for what
@@ -169,19 +178,17 @@ rather than as hung.
 
 The node posts to `<base>/v1/systemone` with `Authorization: Bearer
 <access_token>` when a key is set, where `<base>` is the profile's `url` or
-`https://thejevai.com`. Four notes, all learned against the live service rather
+`https://api.typesafe.ai`. Four notes, all learned against the live service rather
 than from the reference:
 
-- The default host is **not** the documented one, and the difference is real.
-  `docs.typesafe.ai` documents `https://api.typesafe.ai/v1/systemone`, which is
-  live and whose documented reply is **flat** (`{model, answers, usage}`).
-  `thejevai.com` — the gateway these keys are issued for, and the one every run
-  behind this node went to — answers with an **envelope**
-  (`{code, message, data:{result, creditsUsed}}`) that the reference never
-  mentions, and that is where `credits_used` and `elapsed_ms` come from. Two
-  gateways in front of the same model: the default stays on the one the keys
-  belong to, `reply()` decodes both, and a profile can point `url` at either.
-  Both sit behind a CDN that screens unfamiliar clients, so the node sends an
+- Two reply shapes, both decoded. TypeSafe's own API returns the answer
+  document **flat** (`{model, answers, usage}`), as the reference documents.
+  An aggregator such as `thejevai.com` wraps it in an **envelope**
+  (`{code, message, data:{result, creditsUsed}}`) — which is where
+  `credits_used` and `elapsed_ms` come from, so a metered gateway is still
+  accounted for on the canvas. `apiResponse.reply()` reconciles the two, and a
+  non-zero `code` on an HTTP 200 is treated as a failure rather than an answer.
+  Hosts sit behind CDNs that screen unfamiliar clients, so the node sends an
   explicit `User-Agent`.
 - The live reply is **wrapped**: `{"code":0,"message":"ok","data":{"result":{…},"creditsUsed":1}}`,
   while the reference shows the answer document flat at the top level. The node
