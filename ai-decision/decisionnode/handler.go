@@ -8,13 +8,13 @@ import (
 	"github.com/Inflowenger/go-plugin-sdk/sdkv1"
 )
 
-// Register wires the Jev node's `run` action onto the plugin. Call it before
+// Register wires the node's `run` action onto the plugin. Call it before
 // p.Start().
 func Register(p *sdkv1.Plugin) {
 	p.AddAction(sdkv1.Action{
 		Method:         "run",
 		Title:          "Run",
-		Description:    "Evaluate the state (and any evidence) against typed questions on a System One decision model \u2014 hosted Jev or local Laya \u2014 and route by the answers",
+		Description:    "Evaluate the state (and any evidence) against typed questions on a decision model \u2014 System One (hosted Jev, local Laya or Ollama nimble) or the Decisions API (gpt-6-luna), chosen by the settings profile \u2014 and route by the answers",
 		RequestHandler: runHandler,
 	})
 }
@@ -56,12 +56,20 @@ func runHandler(job sdkv1.Job) {
 		return
 	}
 	cfg := req.Body.Settings
-	if err := validateSettings(cfg); err != nil {
+	// Which protocol the profile speaks is the first thing to settle: every
+	// check below it — the required fields, the score-level ceiling, the wire
+	// body, the retryable statuses — depends on the answer.
+	d, err := dialectOf(cfg)
+	if err != nil {
+		job.DoneWithError(err.Error())
+		return
+	}
+	if err := validateSettings(d, cfg); err != nil {
 		job.DoneWithError(err.Error())
 		return
 	}
 	questions := req.Body.Questions
-	if err := validateQuestions(questions); err != nil {
+	if err := validateQuestions(questions, d.maxScoreLevels(cfg)); err != nil {
 		job.DoneWithError(err.Error())
 		return
 	}
@@ -88,16 +96,17 @@ func runHandler(job sdkv1.Job) {
 	//    An API failure (bad key, validation, rate limit past the retry budget,
 	//    overload, network) is the first exception case: the flow leaves through
 	//    `_exception` instead of stopping at this node.
-	model := modelOf(cfg)
+	model := modelOf(d, cfg)
 	job.Progress(20, sdkv1.Frame{
 		Title:   "thinking",
 		Content: fmt.Sprintf("evaluating %d question(s) on %s", len(questions), model),
 	})
-	resp, err := callDecision(context.Background(), cfg, buildRequest(res, cfg, state, questions),
+	resp, err := callDecision(context.Background(), d, cfg, d.buildRequest(res, model, state, questions),
 		func(msg string) { job.Progress(20, sdkv1.Frame{Title: "waiting", Content: msg}) })
 	if err != nil {
 		Exception(job, "provider_error", "provider error: "+err.Error(), map[string]any{
-			"model": model,
+			"model":    model,
+			"provider": d.name(),
 		})
 		return
 	}
@@ -109,10 +118,11 @@ func runHandler(job sdkv1.Job) {
 	//    or answers with an undeclared option has no port to follow, so it routes
 	//    `_exception`; a data-only question with the same problem is just left
 	//    out of the answers, since nothing downstream was drawn on it.
-	decisions := make(map[string]Decision, len(questions))
+	answers := make(map[string]Decision, len(questions))
 	var (
 		tags      []string // outbound-port tags to fire, in question order
 		uncertain []string // routed questions whose confidence fell below their floor
+		refused   []string // questions the model declined to answer at all
 	)
 	for _, q := range questions {
 		a, ok := resp.Answers[q.ID]
@@ -120,36 +130,57 @@ func runHandler(job sdkv1.Job) {
 			if q.routes() {
 				Exception(job, "no_answer", fmt.Sprintf("no answer for routed question %q", q.ID), map[string]any{
 					"model":    model,
+					"provider": d.name(),
 					"question": q.ID,
-					"answers":  decisions,
+					"answers":  answers,
 				})
 				return
 			}
 			continue
 		}
-		d, err := decide(q, a)
+		// A refusal is the Decisions API declining one question while answering
+		// the rest. It is not a wire mismatch and not a low-confidence answer —
+		// there is simply no answer — so a routed question has no port to take
+		// and leaves through `_exception` with its own code, while a data-only
+		// one is recorded and skipped.
+		if a.Refused {
+			refused = append(refused, q.ID)
+			if q.routes() {
+				Exception(job, "refused", fmt.Sprintf("the model declined to answer routed question %q", q.ID), map[string]any{
+					"model":    model,
+					"provider": d.name(),
+					"question": q.ID,
+					"refused":  refused,
+					"answers":  answers,
+				})
+				return
+			}
+			continue
+		}
+		dec, err := decide(q, a)
 		if err != nil {
 			if q.routes() {
 				Exception(job, "unbound_option", err.Error(), map[string]any{
 					"model":    model,
+					"provider": d.name(),
 					"question": q.ID,
 					"answer":   a,
-					"answers":  decisions,
+					"answers":  answers,
 				})
 				return
 			}
 			continue
 		}
 		if q.routes() {
-			d.Routed = true
-			tags = append(tags, d.Tag)
-			if q.MinConfidence > 0 && d.Confidence < q.MinConfidence {
+			dec.Routed = true
+			tags = append(tags, dec.Tag)
+			if q.MinConfidence > 0 && dec.Confidence < q.MinConfidence {
 				uncertain = append(uncertain, q.ID)
 			}
 		}
-		decisions[q.ID] = d
+		answers[q.ID] = dec
 	}
-	job.Progress(90, sdkv1.Frame{Title: "decided", Content: summarize(decisions)})
+	job.Progress(90, sdkv1.Frame{Title: "decided", Content: summarize(answers)})
 
 	// 4. The confidence floor. The designer asked this node not to act on a
 	//    routed answer it is not sure enough about: instead of that answer's port,
@@ -163,8 +194,9 @@ func runHandler(job sdkv1.Job) {
 			"confidence below the floor for question(s): "+strings.Join(uncertain, ", "),
 			map[string]any{
 				"model":        model,
+				"provider":     d.name(),
 				"uncertain":    uncertain,
-				"answers":      decisions,
+				"answers":      answers,
 				"usage":        resp.Usage,
 				"credits_used": resp.CreditsUsed,
 			})
@@ -181,9 +213,17 @@ func runHandler(job sdkv1.Job) {
 		job.CmdNextFilter(tags)
 	}
 	job.Done(map[string]any{
-		"model":   model,
-		"answers": decisions, // every decision, keyed by question id — what lands on the scope
-		"routed":  tags,      // outbound-port tags fired next (empty when nothing routes)
+		"model": model,
+		// Which protocol answered. A flow re-pointed between a local decider
+		// and a hosted one looks identical on the canvas, so the run is the
+		// only place that can record which one actually decided it.
+		"provider": d.name(),
+		"answers":  answers, // every decision, keyed by question id — what lands on the scope
+		"routed":   tags,    // outbound-port tags fired next (empty when nothing routes)
+		// Data-only questions the model declined. A routed refusal never gets
+		// here — it leaves through `_exception` — so this is the non-routed
+		// remainder, reported rather than silently missing from "answers".
+		"refused": refused,
 		"usage":   resp.Usage,
 		// What the call cost and how long the service took. A metered decider is
 		// worth accounting for on the canvas, not only in the vendor console.

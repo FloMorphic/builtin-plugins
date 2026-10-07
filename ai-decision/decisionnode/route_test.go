@@ -1,7 +1,9 @@
 package decisionnode
 
 import (
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -33,7 +35,7 @@ func TestValidateQuestions(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateQuestions(tc.qs)
+			err := validateQuestions(tc.qs, hostedMaxScoreLevels)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("validateQuestions err = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -71,7 +73,7 @@ func TestBuildCriteria(t *testing.T) {
 func TestDecide(t *testing.T) {
 	t.Run("choice routes on the API's choice with the calibrated confidence", func(t *testing.T) {
 		q := Question{ID: "category", Type: typeChoice, Options: []Option{{Name: "billing"}, {Name: "technical"}, {Name: "sales"}}}
-		a := apiAnswer{Type: "choice", Choice: "billing", Probabilities: map[string]float64{"billing": 0.88, "technical": 0.12, "sales": 0}, Confidence: f(0.81)}
+		a := answer{Type: "choice", Choice: "billing", Probabilities: map[string]float64{"billing": 0.88, "technical": 0.12, "sales": 0}, Confidence: f(0.81)}
 		d, err := decide(q, a)
 		if err != nil {
 			t.Fatal(err)
@@ -85,13 +87,13 @@ func TestDecide(t *testing.T) {
 	})
 	t.Run("choice naming an undeclared option is an error, not a tag", func(t *testing.T) {
 		q := Question{ID: "category", Type: typeChoice, Options: []Option{{Name: "billing"}}}
-		if _, err := decide(q, apiAnswer{Type: "choice", Choice: "legal"}); err == nil {
+		if _, err := decide(q, answer{Type: "choice", Choice: "legal"}); err == nil {
 			t.Fatal("expected error")
 		}
 	})
 	t.Run("score picks the most probable level by index and re-keys by name", func(t *testing.T) {
 		q := Question{ID: "urgency", Type: typeScore, Options: []Option{{Name: "low"}, {Name: "medium"}, {Name: "high"}}}
-		a := apiAnswer{Type: "score", Score: f(1.05), Probabilities: map[string]float64{"0": 0, "1": 0.95, "2": 0.05}, Confidence: f(0.92)}
+		a := answer{Type: "score", Score: f(1.05), Probabilities: map[string]float64{"0": 0, "1": 0.95, "2": 0.05}, Confidence: f(0.92)}
 		d, err := decide(q, a)
 		if err != nil {
 			t.Fatal(err)
@@ -105,20 +107,20 @@ func TestDecide(t *testing.T) {
 	})
 	t.Run("noul splits at 0.5 and reports distance from the coin flip", func(t *testing.T) {
 		q := Question{ID: "repeat", Type: typeNoul}
-		d, err := decide(q, apiAnswer{Type: "noul", Noul: f(0.2)})
+		d, err := decide(q, answer{Type: typeNoul, P: f(0.2)})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if d.Answer != "no" || d.Tag != "repeat.no" || d.Confidence != 0.8 || *d.P != 0.2 {
 			t.Fatalf("got %+v", d)
 		}
-		d, _ = decide(q, apiAnswer{Type: "noul", Noul: f(0.5)})
+		d, _ = decide(q, answer{Type: typeNoul, P: f(0.5)})
 		if d.Answer != "yes" {
 			t.Fatalf("0.5 should be yes, got %+v", d)
 		}
 	})
 	t.Run("noul without a probability is an error", func(t *testing.T) {
-		if _, err := decide(Question{ID: "r", Type: typeNoul}, apiAnswer{Type: "noul"}); err == nil {
+		if _, err := decide(Question{ID: "r", Type: typeNoul}, answer{Type: typeNoul}); err == nil {
 			t.Fatal("expected error")
 		}
 	})
@@ -179,7 +181,7 @@ func TestBuildRequestResolvesQuestionTemplates(t *testing.T) {
 		Instructions: map[string]any{"question": "allowed under `policy`?", "policy": "notice"},
 		Options:      []Option{{Name: noulYes, Description: "it is"}},
 	}}
-	req := buildRequest(upper, DecisionSettings{Model: "m"}, "state", qs)
+	req := systemOne{}.buildRequest(upper, "m", "state", qs).(soRequest)
 	got := req.Questions["termination"]
 	wantInstr := map[string]any{"question": "ALLOWED UNDER `POLICY`?", "policy": "NOTICE"}
 	if !reflect.DeepEqual(got.Instructions, wantInstr) {
@@ -191,4 +193,72 @@ func TestBuildRequestResolvesQuestionTemplates(t *testing.T) {
 	if req.State != "state" {
 		t.Fatalf("state should arrive already assembled: %v", req.State)
 	}
+}
+
+// Ceilings on the request's arrays. Every array in the body is assembled
+// upstream — the rows come from the drawer, and each evidence text is a template
+// resolved from the live flow context — so a loop or a bad path upstream can grow
+// one without anything else noticing. These pin that the ceiling is enforced AT
+// the boundary rather than one past it, and that the error names the array so the
+// mistake is findable.
+func TestRequestArrayCeilings(t *testing.T) {
+	questions := func(n int) []Question {
+		out := make([]Question, n)
+		for i := range out {
+			out[i] = Question{
+				ID: fmt.Sprintf("q%d", i), Type: typeChoice, Instructions: "which?",
+				Options: []Option{{Name: "a"}, {Name: "b"}},
+			}
+		}
+		return out
+	}
+	evidence := func(n int) []EvidenceItem {
+		out := make([]EvidenceItem, n)
+		for i := range out {
+			out[i] = EvidenceItem{Source: "doc.pdf", Text: "a chunk"}
+		}
+		return out
+	}
+
+	t.Run("questions", func(t *testing.T) {
+		if err := validateQuestions(questions(maxQuestions), hostedMaxScoreLevels); err != nil {
+			t.Fatalf("exactly the ceiling must pass: %v", err)
+		}
+		err := validateQuestions(questions(maxQuestions+1), hostedMaxScoreLevels)
+		if err == nil {
+			t.Fatal("one past the ceiling must fail")
+		}
+		if !strings.Contains(err.Error(), "too many questions") {
+			t.Fatalf("the error should name the array: %q", err)
+		}
+	})
+
+	t.Run("evidence rows", func(t *testing.T) {
+		if err := validateEvidence(evidence(maxEvidenceRows)); err != nil {
+			t.Fatalf("exactly the ceiling must pass: %v", err)
+		}
+		err := validateEvidence(evidence(maxEvidenceRows + 1))
+		if err == nil {
+			t.Fatal("one past the ceiling must fail")
+		}
+		if !strings.Contains(err.Error(), "too many evidence rows") {
+			t.Fatalf("the error should name the array: %q", err)
+		}
+	})
+
+	// The ceilings are uniform on purpose: a flow that validates against one
+	// profile has to validate against the other, or "swap the profile, keep the
+	// canvas" stops being true. Only the score-level ceiling is per-endpoint.
+	t.Run("the array ceilings do not vary by protocol", func(t *testing.T) {
+		for _, d := range []dialect{systemOne{}, decisions{}} {
+			for _, cfg := range []DecisionSettings{{}, {URL: "http://127.0.0.1:11434", Model: "nimble"}} {
+				if err := validateQuestions(questions(maxQuestions), d.maxScoreLevels(cfg)); err != nil {
+					t.Fatalf("%s: the ceiling must hold everywhere: %v", d.name(), err)
+				}
+				if err := validateQuestions(questions(maxQuestions+1), d.maxScoreLevels(cfg)); err == nil {
+					t.Fatalf("%s: one past the ceiling must fail everywhere", d.name())
+				}
+			}
+		}
+	})
 }

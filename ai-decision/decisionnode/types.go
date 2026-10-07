@@ -1,33 +1,59 @@
 package decisionnode
 
 // DecisionSettings is the shape the frontend settings-profile must produce.
-// Collect these into a profile (e.g. "jev-config", "laya-local") and ship them
-// in body.settings.
+// Collect these into a profile (e.g. "jev-config", "laya-local", "luna") and
+// ship them in body.settings.
 //
-// The node speaks the System One wire protocol (POST /v1/systemone), which is
-// served both by TypeSafe's hosted Jev and by Laya, the open local-first
-// decision model — so which service answers is entirely a property of the
-// profile, not of the node:
+// The node speaks TWO decision protocols, picked by Provider, because the
+// decision-model space settled into two wire shapes rather than one:
 //
-//   - hosted Jev  : AccessToken only; URL and Model may stay empty (the
-//     defaults are the hosted endpoint and jev-latest).
-//   - local Laya  : URL pointing at the local server and the Model it serves;
+//   - "systemone" — POST /v1/systemone: TypeSafe's hosted Jev, the local-first
+//     Laya, OpenJev, and Ollama's local deciders (nimble, tev1).
+//   - "decisions" — POST /v1/decisions: OpenAI's Decisions API, and any gateway
+//     that implements its shape (Vercel's AI Gateway does, and routes Jev
+//     through it too).
+//
+// Which SERVICE answers is a property of the profile, not of the node, and so
+// is which PROTOCOL it speaks. Everything downstream of the dialect — the typed
+// questions, the declared options, the "<question>.<option>" port tags, the
+// confidence floor, the `_exception` branch — is identical either way, so a
+// flow can be re-pointed from a local Nimble to hosted Jev to gpt-6-luna by
+// swapping the profile, with the canvas wiring untouched.
+//
+// Within a protocol the deployment still decides what the profile must carry:
+//
+//   - default endpoint : AccessToken only; URL and Model may stay empty (the
+//     defaults are that protocol's first-party host and model).
+//   - another endpoint : URL pointing at the server and the Model it serves;
 //     AccessToken may be empty, since a local endpoint usually has no key.
 //
-// Because a model id is only guessable for the hosted default, Model is
-// REQUIRED whenever URL names another endpoint (see validateSettings): sending
-// "jev-latest" to a Laya server would come back as a validation error from the
-// far side instead of a readable one from here.
+// Because a model id is only guessable for the default host, Model is REQUIRED
+// whenever URL names another endpoint (see validateSettings): "jev-latest"
+// means nothing to a Laya server, and "gpt-6-luna" means nothing to a gateway
+// that slugs the same model "openai/gpt-6-luna-decisions".
 type DecisionSettings struct {
+	// Provider selects the wire protocol: "systemone" (the default when empty)
+	// or "decisions". Vendor names are accepted as aliases — see dialectOf —
+	// but the canonical values name the PROTOCOL rather than a vendor, because
+	// each shape already carries several vendors and will carry more.
+	//
+	// Empty MUST keep meaning "systemone": settings profiles are snapshotted
+	// onto nodes when applied, so every flow deployed before this field existed
+	// carries provider:"" forever and has to go on behaving as it did.
+	Provider string `json:"provider"`
+
 	AccessToken    string `json:"access_token"`    // bearer API key; omitted from the request when empty (local endpoints)
-	Model          string `json:"model"`           // model id, e.g. "typesafe/jev-1.13"; empty ⇒ defaultModel (hosted only)
-	URL            string `json:"url"`             // optional custom *base* URL; empty ⇒ defaultBaseURL
+	Model          string `json:"model"`           // model id, e.g. "typesafe/jev-1.13", "gpt-6-luna"; empty ⇒ the dialect's default (default host only)
+	URL            string `json:"url"`             // optional custom *base* URL; empty ⇒ the dialect's default host
 	TimeoutSeconds int    `json:"timeout_seconds"` // optional per-call timeout; ≤0 ⇒ defaultTimeout
 
 	// MaxRetries is how many FURTHER attempts a failed call gets, and only for
-	// the two statuses the service asks callers to back off on (429, 529).
+	// the statuses the protocol asks callers to back off on (see
+	// dialect.retryable — 429/529 for System One, 429 and any 5xx for the
+	// Decisions API, which is what OpenAI's own SDKs retry).
+	//
 	// How reliable a particular endpoint is — a shared key against a
-	// rate-limited hosted service, a local Laya with nothing in front of it —
+	// rate-limited hosted service, a local Nimble with nothing in front of it —
 	// is a property of the connection rather than of the decision, which is
 	// why it belongs to the profile, exactly as it does on the LLM node.
 	//
@@ -43,13 +69,19 @@ type DecisionSettings struct {
 // drawer — the same {name, description} row an LLM bound function has, and for
 // the same reason: Name is the identity the runtime routes on (it becomes the
 // option's outbound-port tag, prefixed by the question id), Description is the
-// model-facing text Jev uses to decide whether the state matches it.
+// model-facing text the service uses to decide whether the state matches it.
 //
 // For a `score` question the rows are the ordered levels (index 0 is the lowest)
-// and Description is what the API scores against — an empty description falls
-// back to the name. For a `noul` question the rows are named "yes" and "no"
-// (also accepted: "true"/"false") and carry only the descriptions; both rows are
-// optional.
+// and Description is what the API scores against. For a `noul` question the rows
+// are named "yes" and "no" (also accepted: "true"/"false") and carry only the
+// descriptions; both rows are optional.
+//
+// How a blank Description is treated is the one place the two protocols differ
+// visibly. System One names its options as criteria KEYS and wants a value for
+// each, so an empty description falls back to the name; the Decisions API
+// carries the name as the choice's `value` and treats `description` as
+// optional, so a blank one is simply left off the wire. The model sees the
+// option name either way.
 type Option struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
@@ -57,10 +89,11 @@ type Option struct {
 
 // Question is one typed question the node asks of the state. ID is the key the
 // answer comes back under and the prefix of every port tag this question
-// derives ("<id>.<option>"). Type selects the API question type: "choice",
-// "score" or "noul". Options are the declared answers (see Option).
+// derives ("<id>.<option>"). Type selects the question type in the node's own
+// vocabulary — "choice", "score" or "noul" — which each dialect maps onto its
+// protocol's name ("noul" is the Decisions API's "predicate").
 //
-// Instructions is what to decide about the state, and the API accepts it in
+// Instructions is what to decide about the state, and System One accepts it in
 // either of two forms, so this field is typed `any`:
 //
 //   - a string — the plain question ("Which team should handle this?");
@@ -71,6 +104,11 @@ type Option struct {
 //
 //     { "question": "Does this qualify for termination under `policy`?",
 //     "policy":   "{{$.kb.termination_policy}}" }
+//
+// The Decisions API documents `instructions` as a string only, so the decisions
+// dialect flattens the structured form to JSON text (see instructionsText). The
+// backticked-citation idiom survives that, since it is a convention about the
+// text rather than about the encoding.
 //
 // Either form is a TEMPLATE: every string in it (at any depth, for the object
 // form) has its {{$.a.b}} tokens resolved against the live flow context before
@@ -106,12 +144,12 @@ func (q Question) routes() bool {
 // with the chunk into the state and a question can then cite the chunk it means
 // by backticked path (`evidence[0].text`) and report which source decided it.
 //
-// The API has no separate evidence parameter — the request body is only
-// {model, state, questions} — so evidence is not a second input to the service:
-// assembleState folds these rows INTO the state object. Keep them few and
-// filtered: the state and all the questions share one context budget (~64k
-// tokens, with state plus the longest question inside ~32k), and accuracy falls
-// as the state fills with material the questions do not need.
+// Neither protocol has a separate evidence parameter — System One's body is
+// {model, state, questions} and the Decisions API's is {model, input,
+// questions} — so evidence is not a second input to the service: assembleState
+// folds these rows INTO the subject. Keep them few and filtered: the subject
+// and all the questions share one context budget, and accuracy falls as the
+// state fills with material the questions do not need.
 type EvidenceItem struct {
 	Source string `json:"source,omitempty"` // provenance: file, URL, row id — a template
 	Text   string `json:"text"`             // the chunk — a template
@@ -140,113 +178,58 @@ type RunBody struct {
 // answer, the tag it routes on, the full distribution re-keyed by option name,
 // and the confidence the threshold and downstream rule nodes read. Score and P
 // carry the type-specific raw values (the continuous score of a score question;
-// the yes-probability of a noul) for readers who want them. Every Decision is
-// reported under "answers" in the run's Done payload, keyed by question id.
+// the yes-probability of a noul/predicate) for readers who want them. Every
+// Decision is reported under "answers" in the run's Done payload, keyed by
+// question id.
 type Decision struct {
-	Question      string             `json:"question"`
-	Type          string             `json:"type"`
-	Answer        string             `json:"answer"`          // top option name
-	Tag           string             `json:"tag"`             // "<question>.<answer>" — the port tag
-	Confidence    float64            `json:"confidence"`      // calibrated confidence of Answer
+	Question string `json:"question"`
+	Type     string `json:"type"`
+	Answer   string `json:"answer"` // top option name
+	Tag      string `json:"tag"`    // "<question>.<answer>" — the port tag
+	// How sure the service is of Answer — and NOT a calibrated probability of
+	// being correct, on either protocol: System One derives it from the spread
+	// of the distribution (1 - H(p)/ln(N), so 0 means uniform), and the
+	// Decisions API has the model report it, which OpenAI's own guidance says
+	// to calibrate against your own labelled examples before trusting. A
+	// min_confidence floor tuned on one service does not transfer to the other.
+	Confidence    float64            `json:"confidence"`
 	Probabilities map[string]float64 `json:"probabilities"`   // option name → probability
 	Score         *float64           `json:"score,omitempty"` // score question: continuous score
 	P             *float64           `json:"p,omitempty"`     // noul question: probability of "yes"
 	Routed        bool               `json:"routed"`          // whether Tag was fired as a next-filter
 }
 
-// ---- wire shapes of POST /v1/systemone ------------------------------------
+// ---- the protocol-independent middle ---------------------------------------
 
-// apiRequest is the System One request body: the state, the model, and the
-// questions keyed by id. Questions run in parallel against the same state.
-type apiRequest struct {
-	State     any                    `json:"state"`
-	Model     string                 `json:"model"`
-	Questions map[string]apiQuestion `json:"questions"`
+// answer is one question's answer with the wire shape taken off it. Each
+// dialect decodes its own protocol into this, and decide() reduces it to a
+// Decision without knowing which service replied — that split is what lets the
+// routing semantics be written once.
+//
+// Probabilities is keyed the way decide() reads it: by OPTION NAME for a
+// choice, and by LEVEL INDEX ("0", "1", …) for a score, which is how System One
+// reports a score natively and what the decisions dialect converts its
+// [{value, label, probability}] rows into.
+type answer struct {
+	Type          string             // the node's vocabulary: choice | score | noul
+	Choice        string             // choice: the chosen option name
+	Score         *float64           // score: the probability-weighted level
+	P             *float64           // noul/predicate: probability of yes
+	Probabilities map[string]float64 // choice: name → p; score: level index → p
+	Confidence    *float64           // where the service reports one
+	Refused       bool               // the model declined this question (Decisions API only)
 }
 
-// apiQuestion is one question on the wire. Criteria's shape depends on Type:
-// a name→description map for choice, an ordered []string of level descriptions
-// for score, and a {"true": …, "false": …} map for noul (see buildCriteria).
-type apiQuestion struct {
-	Type string `json:"type"`
-	// string | object | array, as the API documents it and as the node received
-	// it, with every template resolved (see resolveTemplateValue).
-	Instructions any `json:"instructions"`
-	Criteria     any `json:"criteria,omitempty"`
-}
-
-// apiResponse is the reply, decoded permissively because the service and the
-// published reference disagree on where the answers sit. The live endpoint
-// wraps them — {"code":0,"message":"ok","data":{"result":{…},"creditsUsed":1}}
-// — while docs.typesafe.ai's API reference shows the same document flat at the
-// top level. Both are decoded here and reconciled by reply(): Data wins when
-// present, the flat fields are the fallback, so neither shape breaks the node.
-type apiResponse struct {
-	// enveloped form (what api returns today)
-	Code    int      `json:"code"`
-	Message string   `json:"message"`
-	Data    *apiData `json:"data"`
-
-	// flat form (the published reference)
-	Model   string               `json:"model"`
-	Answers map[string]apiAnswer `json:"answers"`
-	Usage   map[string]any       `json:"usage"`
-}
-
-// apiData is the envelope's payload: the answer document plus what the call
-// cost. CreditsUsed is worth carrying to the canvas — a decision node runs on a
-// metered budget, and the run that spent the credit is the only place that can
-// report it.
-type apiData struct {
-	Result      apiResult `json:"result"`
-	CreditsUsed int       `json:"creditsUsed"`
-}
-
-// apiResult is the answer document itself: one answer per question id, the
-// exact model version that answered, the token usage and the service-side
-// latency.
-type apiResult struct {
-	Model     string               `json:"model"`
-	Answers   map[string]apiAnswer `json:"answers"`
-	Usage     map[string]any       `json:"usage"`
-	ElapsedMs int                  `json:"elapsedMs"`
-}
-
-// reply is the normalized result the handler works with, whichever shape the
-// service answered in.
+// reply is the normalized result the handler works with, whichever protocol —
+// and, within System One, whichever of its two reply shapes — answered.
+//
+// CreditsUsed and ElapsedMs are only reported by some endpoints (the aggregator
+// envelope carries both); they stay zero elsewhere rather than being faked, so
+// a canvas reading them shows a real number or nothing.
 type reply struct {
 	Model       string
-	Answers     map[string]apiAnswer
+	Answers     map[string]answer
 	Usage       map[string]any
 	ElapsedMs   int
 	CreditsUsed int
-}
-
-// reply reconciles the two shapes: the envelope when the service sent one,
-// otherwise the flat document.
-func (r apiResponse) reply() reply {
-	if r.Data != nil {
-		return reply{
-			Model:       r.Data.Result.Model,
-			Answers:     r.Data.Result.Answers,
-			Usage:       r.Data.Result.Usage,
-			ElapsedMs:   r.Data.Result.ElapsedMs,
-			CreditsUsed: r.Data.CreditsUsed,
-		}
-	}
-	return reply{Model: r.Model, Answers: r.Answers, Usage: r.Usage}
-}
-
-// apiAnswer is the union of the three answer shapes; only the fields of the
-// answer's Type are set. Choice/score carry Probabilities (keyed by option name,
-// or by level index for score, with Legend mapping index → description) and a
-// Confidence; noul carries only Noul, the probability the statement is true.
-type apiAnswer struct {
-	Type          string             `json:"type"`
-	Choice        string             `json:"choice,omitempty"`
-	Score         *float64           `json:"score,omitempty"`
-	Legend        map[string]string  `json:"legend,omitempty"`
-	Noul          *float64           `json:"noul,omitempty"`
-	Probabilities map[string]float64 `json:"probabilities,omitempty"`
-	Confidence    *float64           `json:"confidence,omitempty"`
 }

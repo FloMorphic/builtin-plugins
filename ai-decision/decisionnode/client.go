@@ -14,43 +14,13 @@ import (
 )
 
 const (
-	// The node's default host: TypeSafe's own, first-party API, as the vendor
-	// reference documents it.
-	//
-	// It is deliberately NOT thejevai.com, which an earlier version of this
-	// node defaulted to. That host is a third-party AGGREGATOR — its catalogue
-	// spans several vendors (typesafe/jev, convaiinnovations/laya,
-	// cloudflare/clef, perplexity/pplx-decider, …), it bills in credits where
-	// TypeSafe bills per input token, and it answers with an envelope
-	// ({code, message, data:{result, creditsUsed}}) that appears nowhere in the
-	// reference. Useful, and the only way to reach several of those models
-	// behind one key — but a workflow product should not route a customer's
-	// state through an unaffiliated third party unless someone chose to, so it
-	// is a `url` a profile opts into rather than the default.
-	//
-	// Keys are not interchangeable between the two: an aggregator key will not
-	// authenticate here, and a TypeSafe key (console.typesafe.ai) will not
-	// authenticate there. apiResponse.reply() decodes both reply shapes, so the
-	// only thing a profile has to get right is the pair of url and key.
-	defaultBaseURL = "https://api.typesafe.ai"
-	// The hosted service's documented alias, used only when the profile talks
-	// to defaultBaseURL (validateSettings requires an explicit model for any
-	// other endpoint, since this alias means nothing there). The hosted service
-	// also accepts a vendor-prefixed, pinned id ("typesafe/jev-1.13"), which is
-	// the safer thing to put in a profile once a flow is in production — a
-	// decision node changing model under a flow is a change someone should
-	// choose.
-	defaultModel   = "jev-latest"
 	defaultTimeout = 30 * time.Second
-	// The one endpoint of the protocol. Both the hosted service and Laya serve
-	// it, which is why this node is not bound to either.
-	endpointPath = "/v1/systemone"
 
-	// The API asks callers to back off on 429 (rate limit) and 529 (overloaded),
-	// and documents no other retryable status. A decision node sits on the hot
-	// path of a flow, so the default budget is deliberately small — two further
-	// attempts, ~0.5s then 1s apart — after which the failure routes
-	// `_exception` and the flow decides what to do about it.
+	// A decision node sits on the hot path of a flow, so the default retry
+	// budget is deliberately small — two further attempts, ~0.5s then 1s apart
+	// — after which the failure routes `_exception` and the flow decides what
+	// to do about it. Which statuses are retried at all is the protocol's
+	// business: see dialect.retryable.
 	//
 	// DefaultMaxRetries is what a profile that never mentions retrying gets. A
 	// profile can raise it for a rate-limited key, or set it to 0 for a flow
@@ -66,54 +36,62 @@ const (
 	// How much of an error reply body is quoted back in the failure reason.
 	errBodyLimit = 300
 
-	// The host sits behind a CDN that screens unfamiliar clients, so identify
+	// Both hosts sit behind a CDN that screens unfamiliar clients, so identify
 	// the node rather than leaving Go's default agent on the request.
-	userAgent = "flomorphic-ai-decision-node/0.1"
+	userAgent = "flomorphic-ai-decision-node/0.2"
 )
 
-// validateSettings checks the profile the way the two deployments differ.
+// validateSettings checks the profile the way the deployments differ, which is
+// the same rule on either protocol: it follows the URL.
 //
-// A key is required against the hosted service and pointless against a local
-// one, and a model id is only guessable for the hosted default — so the rule
-// follows the URL: the default endpoint needs an access token and may take the
-// default model, while a profile that names its own endpoint (a local Laya, a
-// proxy, a private deployment) needs no token but must say which model that
-// endpoint serves. Sending "jev-latest" to a Laya server would otherwise come
-// back as a 422 from the far side instead of a readable error from here.
-func validateSettings(cfg DecisionSettings) error {
-	if isDefaultEndpoint(cfg) {
+// A key is required against a first-party hosted service and pointless against
+// a local one, and a model id is only guessable for the default host — so the
+// default endpoint needs an access token and may take the dialect's default
+// model, while a profile that names its own endpoint (a local Laya or Nimble, a
+// gateway, a proxy, a private deployment) needs no token but must say which
+// model that endpoint serves.
+//
+// That second half is not pedantry on either protocol: "jev-latest" means
+// nothing to a Nimble server, and "gpt-6-luna" means nothing to a gateway that
+// slugs the same model "openai/gpt-6-luna-decisions". Either would come back as
+// a validation error from the far side instead of a readable one from here.
+func validateSettings(d dialect, cfg DecisionSettings) error {
+	if isDefaultEndpoint(d, cfg) {
 		if strings.TrimSpace(cfg.AccessToken) == "" {
-			return fmt.Errorf("missing required settings-profile fields: settings.access_token (required for the hosted endpoint %s)", defaultBaseURL)
+			return fmt.Errorf("missing required settings-profile fields: settings.access_token (required for the hosted %s endpoint %s)",
+				d.name(), d.defaultBaseURL())
 		}
 		return nil
 	}
 	if strings.TrimSpace(cfg.Model) == "" {
-		return fmt.Errorf("missing required settings-profile fields: settings.model (required when settings.url names its own endpoint, e.g. a local Laya server)")
+		return fmt.Errorf("missing required settings-profile fields: settings.model (required when settings.url names its own endpoint — a local server, a gateway or a proxy — because %q is only meaningful at %s)",
+			d.defaultModel(), d.defaultBaseURL())
 	}
 	return nil
 }
 
-// isDefaultEndpoint reports whether the profile talks to the hosted service.
-func isDefaultEndpoint(cfg DecisionSettings) bool {
-	return baseURL(cfg) == defaultBaseURL
+// isDefaultEndpoint reports whether the profile talks to the protocol's
+// first-party host.
+func isDefaultEndpoint(d dialect, cfg DecisionSettings) bool {
+	return baseURL(d, cfg) == d.defaultBaseURL()
 }
 
-// baseURL returns the profile's base URL or the public default, without a
+// baseURL returns the profile's base URL or the dialect's default, without a
 // trailing slash so the endpoint path joins cleanly.
-func baseURL(cfg DecisionSettings) string {
+func baseURL(d dialect, cfg DecisionSettings) string {
 	u := strings.TrimSpace(cfg.URL)
 	if u == "" {
-		u = defaultBaseURL
+		u = d.defaultBaseURL()
 	}
 	return strings.TrimRight(u, "/")
 }
 
-// modelOf returns the profile's model id or the default alias.
-func modelOf(cfg DecisionSettings) string {
+// modelOf returns the profile's model id or the dialect's default.
+func modelOf(d dialect, cfg DecisionSettings) string {
 	if m := strings.TrimSpace(cfg.Model); m != "" {
 		return m
 	}
-	return defaultModel
+	return d.defaultModel()
 }
 
 // timeoutOf returns the per-call timeout the profile set, or the default.
@@ -161,7 +139,7 @@ func waitFor(attempt int, hint time.Duration) time.Duration {
 	return wait
 }
 
-// retryAfter reads the Retry-After header, which the service may send with a
+// retryAfter reads the Retry-After header, which either service may send with a
 // 429. Both documented forms are accepted: a delay in seconds, or an HTTP date.
 func retryAfter(h http.Header) time.Duration {
 	v := strings.TrimSpace(h.Get("Retry-After"))
@@ -182,23 +160,24 @@ func retryAfter(h http.Header) time.Duration {
 	return 0
 }
 
-// callDecision POSTs one System One request and decodes the reply. Transient
-// statuses (429, 529) are retried, as many times as the profile allows, waiting
-// for whatever the service asked for or an exponential backoff; any other
-// non-2xx status is returned at once with the status and a slice of the body so
-// the exception branch can see what the API objected to (a 422 names the
-// question that failed validation).
+// callDecision POSTs one request and decodes the reply through the dialect.
+// Transient statuses — whichever ones the protocol asks callers to back off on
+// — are retried as many times as the profile allows, waiting for whatever the
+// service asked for or an exponential backoff; any other non-2xx status is
+// returned at once with the status and a slice of the body so the exception
+// branch can see what the API objected to (a 400/422 names the question or the
+// field that failed validation).
 //
 // `notify` is called before each wait so the canvas shows the backoff rather
 // than the node going quiet — with retries raised on a rate-limited key, a
 // silent node is easy to mistake for a hang.
-func callDecision(ctx context.Context, cfg DecisionSettings, req apiRequest, notify func(string)) (reply, error) {
+func callDecision(ctx context.Context, d dialect, cfg DecisionSettings, req any, notify func(string)) (reply, error) {
 	payload, err := sonic.Marshal(req)
 	if err != nil {
 		return reply{}, fmt.Errorf("encode request: %w", err)
 	}
 	client := &http.Client{Timeout: timeoutOf(cfg)}
-	url := baseURL(cfg) + endpointPath
+	url := baseURL(d, cfg) + d.path()
 	retries := retriesOf(cfg)
 
 	var (
@@ -218,7 +197,7 @@ func callDecision(ctx context.Context, cfg DecisionSettings, req apiRequest, not
 				return reply{}, ctx.Err()
 			}
 		}
-		resp, hint, retry, err := postOnce(ctx, client, url, cfg.AccessToken, payload)
+		resp, hint, retry, err := postOnce(ctx, client, d, url, cfg.AccessToken, payload)
 		if err == nil {
 			return resp, nil
 		}
@@ -231,8 +210,8 @@ func callDecision(ctx context.Context, cfg DecisionSettings, req apiRequest, not
 }
 
 // postOnce performs a single attempt. The retry flag tells the caller whether
-// the failure is one the API asks to be retried (rate limit / overload).
-func postOnce(ctx context.Context, client *http.Client, url, token string, payload []byte) (reply, time.Duration, bool, error) {
+// the failure is one the protocol asks to be retried.
+func postOnce(ctx context.Context, client *http.Client, d dialect, url, token string, payload []byte) (reply, time.Duration, bool, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return reply{}, 0, false, err
@@ -257,20 +236,14 @@ func postOnce(ctx context.Context, client *http.Client, url, token string, paylo
 	}
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		retry := res.StatusCode == http.StatusTooManyRequests || res.StatusCode == 529
-		return reply{}, retryAfter(res.Header), retry, fmt.Errorf("decision api %s: %s", res.Status, snippet(body))
+		return reply{}, retryAfter(res.Header), d.retryable(res.StatusCode),
+			fmt.Errorf("decision api %s: %s", res.Status, snippet(body))
 	}
 
-	var out apiResponse
-	if err := sonic.Unmarshal(body, &out); err != nil {
-		return reply{}, 0, false, fmt.Errorf("decode reply: %w (%s)", err, snippet(body))
+	r, err := d.decode(body)
+	if err != nil {
+		return reply{}, 0, false, err
 	}
-	// The envelope carries its own status: a non-zero `code` is a failure the
-	// service reported with HTTP 200, so it must not pass as an answer.
-	if out.Code != 0 {
-		return reply{}, 0, false, fmt.Errorf("decision api code %d: %s", out.Code, out.Message)
-	}
-	r := out.reply()
 	if len(r.Answers) == 0 {
 		return reply{}, 0, false, fmt.Errorf("decision api returned no answers (%s)", snippet(body))
 	}

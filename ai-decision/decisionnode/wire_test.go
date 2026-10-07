@@ -40,7 +40,7 @@ func TestWireShapeMatchesTheDocumentedModel(t *testing.T) {
 		Instructions: map[string]any{"question": "Does `case.problem` qualify under `evidence[0].text`?"},
 		Options:      []Option{{Name: noulYes, Description: "it qualifies"}},
 	}}
-	if err := validateQuestions(questions); err != nil {
+	if err := validateQuestions(questions, hostedMaxScoreLevels); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
 
@@ -49,7 +49,7 @@ func TestWireShapeMatchesTheDocumentedModel(t *testing.T) {
 		{Source: "regulation.pdf", Text: "Section 44 requires..."},
 	}
 	state := assembleState(map[string]any{"customer": "ABC Ltd", "problem": "Early contract termination"}, evidence)
-	req := buildRequest(identity, cfg, state, questions)
+	req := systemOne{}.buildRequest(identity, modelOf(systemOne{}, cfg), state, questions)
 
 	raw, err := sonic.Marshal(req)
 	if err != nil {
@@ -107,7 +107,7 @@ func TestWireShapeMatchesTheDocumentedModel(t *testing.T) {
 // did, so no deployed flow changes behaviour on this upgrade.
 func TestWireShapeWithoutEvidenceIsUnchanged(t *testing.T) {
 	q := []Question{{ID: "category", Type: typeChoice, Instructions: "Which team?", Options: []Option{{Name: "billing", Description: "Payments"}}}}
-	req := buildRequest(identity, DecisionSettings{Model: "jev-latest"}, assembleState("a ticket", nil), q)
+	req := systemOne{}.buildRequest(identity, "jev-latest", assembleState("a ticket", nil), q)
 	raw, _ := sonic.Marshal(req)
 	want := `{"state":"a ticket","model":"jev-latest","questions":{"category":{"type":"choice","instructions":"Which team?","criteria":{"billing":"Payments"}}}}`
 	if string(raw) != want {

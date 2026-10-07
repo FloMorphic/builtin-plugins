@@ -14,9 +14,9 @@ import (
 
 func TestCallDecision(t *testing.T) {
 	t.Run("posts the request shape and decodes the answers", func(t *testing.T) {
-		var got apiRequest
+		var got soRequest
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != endpointPath || r.Method != http.MethodPost {
+			if r.URL.Path != systemOnePath || r.Method != http.MethodPost {
 				t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 			}
 			if r.Header.Get("Authorization") != "Bearer k3y" {
@@ -32,11 +32,12 @@ func TestCallDecision(t *testing.T) {
 
 		cfg := DecisionSettings{AccessToken: "k3y", URL: srv.URL + "/"}
 		q := Question{ID: "category", Type: typeChoice, Instructions: "which team?", Options: []Option{{Name: "billing", Description: "Payments"}, {Name: "sales"}}}
-		resp, err := callDecision(context.Background(), cfg, buildRequest(identity, cfg, "duplicate charge", []Question{q}), nil)
+		resp, err := callDecision(context.Background(), systemOne{}, cfg,
+			systemOne{}.buildRequest(identity, modelOf(systemOne{}, cfg), "duplicate charge", []Question{q}), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Model != defaultModel || got.State != "duplicate charge" {
+		if got.Model != systemOneModel || got.State != "duplicate charge" {
 			t.Fatalf("request = %+v", got)
 		}
 		if got.Questions["category"].Type != "choice" {
@@ -57,7 +58,7 @@ func TestCallDecision(t *testing.T) {
 			_, _ = w.Write([]byte(`{"model":"jev","answers":{"q":{"type":"noul","noul":0.6}}}`))
 		}))
 		defer srv.Close()
-		_, err := callDecision(context.Background(), DecisionSettings{AccessToken: "k", URL: srv.URL}, apiRequest{}, nil)
+		_, err := callDecision(context.Background(), systemOne{}, DecisionSettings{AccessToken: "k", URL: srv.URL}, soRequest{}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -73,7 +74,7 @@ func TestCallDecision(t *testing.T) {
 			http.Error(w, `{"error":"Missing or invalid API key"}`, http.StatusUnauthorized)
 		}))
 		defer srv.Close()
-		_, err := callDecision(context.Background(), DecisionSettings{AccessToken: "bad", URL: srv.URL}, apiRequest{}, nil)
+		_, err := callDecision(context.Background(), systemOne{}, DecisionSettings{AccessToken: "bad", URL: srv.URL}, soRequest{}, nil)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -92,7 +93,7 @@ func TestCallDecision(t *testing.T) {
 			http.Error(w, "overloaded", 529)
 		}))
 		defer srv.Close()
-		_, err := callDecision(context.Background(), DecisionSettings{AccessToken: "k", URL: srv.URL}, apiRequest{}, nil)
+		_, err := callDecision(context.Background(), systemOne{}, DecisionSettings{AccessToken: "k", URL: srv.URL}, soRequest{}, nil)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -119,11 +120,11 @@ func TestCallDecisionEnvelope(t *testing.T) {
 	t.Run("enveloped reply is unwrapped, credits carried", func(t *testing.T) {
 		srv := serve(`{"code":0,"message":"ok","data":{"result":{"answers":{"urgency":{"type":"noul","noul":0.61}},"usage":{"input_tokens":311,"output_tokens":21},"elapsedMs":1801},"creditsUsed":1}}`)
 		defer srv.Close()
-		got, err := callDecision(context.Background(), DecisionSettings{AccessToken: "k", URL: srv.URL}, apiRequest{}, nil)
+		got, err := callDecision(context.Background(), systemOne{}, DecisionSettings{AccessToken: "k", URL: srv.URL}, soRequest{}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if *got.Answers["urgency"].Noul != 0.61 {
+		if *got.Answers["urgency"].P != 0.61 {
 			t.Errorf("answers = %+v", got.Answers)
 		}
 		if got.CreditsUsed != 1 || got.ElapsedMs != 1801 {
@@ -137,11 +138,11 @@ func TestCallDecisionEnvelope(t *testing.T) {
 	t.Run("flat reply still works", func(t *testing.T) {
 		srv := serve(`{"model":"jev-1.13.0","answers":{"urgency":{"type":"noul","noul":0.2}},"usage":{"input_tokens":10}}`)
 		defer srv.Close()
-		got, err := callDecision(context.Background(), DecisionSettings{AccessToken: "k", URL: srv.URL}, apiRequest{}, nil)
+		got, err := callDecision(context.Background(), systemOne{}, DecisionSettings{AccessToken: "k", URL: srv.URL}, soRequest{}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Model != "jev-1.13.0" || *got.Answers["urgency"].Noul != 0.2 || got.CreditsUsed != 0 {
+		if got.Model != "jev-1.13.0" || *got.Answers["urgency"].P != 0.2 || got.CreditsUsed != 0 {
 			t.Errorf("reply = %+v", got)
 		}
 	})
@@ -149,7 +150,7 @@ func TestCallDecisionEnvelope(t *testing.T) {
 	t.Run("non-zero code on HTTP 200 is an error", func(t *testing.T) {
 		srv := serve(`{"code":4001,"message":"insufficient credits","data":null}`)
 		defer srv.Close()
-		_, err := callDecision(context.Background(), DecisionSettings{AccessToken: "k", URL: srv.URL}, apiRequest{}, nil)
+		_, err := callDecision(context.Background(), systemOne{}, DecisionSettings{AccessToken: "k", URL: srv.URL}, soRequest{}, nil)
 		if err == nil || !strings.Contains(err.Error(), "insufficient credits") {
 			t.Fatalf("err = %v", err)
 		}
@@ -158,7 +159,7 @@ func TestCallDecisionEnvelope(t *testing.T) {
 	t.Run("an empty answer set is an error, not a silent pass", func(t *testing.T) {
 		srv := serve(`{"code":0,"message":"ok","data":{"result":{"answers":{}},"creditsUsed":0}}`)
 		defer srv.Close()
-		if _, err := callDecision(context.Background(), DecisionSettings{AccessToken: "k", URL: srv.URL}, apiRequest{}, nil); err == nil {
+		if _, err := callDecision(context.Background(), systemOne{}, DecisionSettings{AccessToken: "k", URL: srv.URL}, soRequest{}, nil); err == nil {
 			t.Fatal("expected error")
 		}
 	})
@@ -167,10 +168,10 @@ func TestCallDecisionEnvelope(t *testing.T) {
 // The default endpoint is the host that actually serves the API, and a profile
 // URL overrides it.
 func TestBaseURL(t *testing.T) {
-	if got := baseURL(DecisionSettings{}); got != "https://api.typesafe.ai" {
+	if got := baseURL(systemOne{}, DecisionSettings{}); got != "https://api.typesafe.ai" {
 		t.Errorf("default baseURL = %q", got)
 	}
-	if got := baseURL(DecisionSettings{URL: "https://proxy.internal/"}); got != "https://proxy.internal" {
+	if got := baseURL(systemOne{}, DecisionSettings{URL: "https://proxy.internal/"}); got != "https://proxy.internal" {
 		t.Errorf("override baseURL = %q", got)
 	}
 }
@@ -180,25 +181,25 @@ func TestValidateSettings(t *testing.T) {
 	// apart: a key is required against the hosted service and pointless against
 	// a local one, while "jev-latest" means nothing to anything but the host.
 	t.Run("hosted needs a key", func(t *testing.T) {
-		if err := validateSettings(DecisionSettings{}); err == nil {
+		if err := validateSettings(systemOne{}, DecisionSettings{}); err == nil {
 			t.Fatal("want an error naming access_token")
 		}
-		if err := validateSettings(DecisionSettings{AccessToken: "k"}); err != nil {
+		if err := validateSettings(systemOne{}, DecisionSettings{AccessToken: "k"}); err != nil {
 			t.Fatalf("hosted with a key: %v", err)
 		}
 	})
 	t.Run("hosted by explicit url still needs a key", func(t *testing.T) {
-		if err := validateSettings(DecisionSettings{URL: defaultBaseURL + "/"}); err == nil {
+		if err := validateSettings(systemOne{}, DecisionSettings{URL: systemOneBaseURL + "/"}); err == nil {
 			t.Fatal("want an error: this is still the hosted endpoint")
 		}
 	})
 	t.Run("a local endpoint needs a model, not a key", func(t *testing.T) {
 		local := DecisionSettings{URL: "http://127.0.0.1:8080"}
-		if err := validateSettings(local); err == nil {
+		if err := validateSettings(systemOne{}, local); err == nil {
 			t.Fatal("want an error naming model")
 		}
 		local.Model = "laya-base"
-		if err := validateSettings(local); err != nil {
+		if err := validateSettings(systemOne{}, local); err != nil {
 			t.Fatalf("local Laya profile should be valid: %v", err)
 		}
 	})
@@ -217,7 +218,7 @@ func TestAuthorizationOmittedWithoutAKey(t *testing.T) {
 	defer srv.Close()
 
 	cfg := DecisionSettings{URL: srv.URL, Model: "laya-base"}
-	if _, err := callDecision(context.Background(), cfg, apiRequest{State: "x", Model: "laya-base"}, nil); err != nil {
+	if _, err := callDecision(context.Background(), systemOne{}, cfg, soRequest{State: "x", Model: "laya-base"}, nil); err != nil {
 		t.Fatalf("call: %v", err)
 	}
 	if had || gotAuth != "" {
@@ -260,7 +261,7 @@ func TestRetryBudgetFromTheProfile(t *testing.T) {
 		srv := serve(&calls)
 		defer srv.Close()
 		none := 0
-		_, err := callDecision(context.Background(), DecisionSettings{AccessToken: "k", URL: srv.URL, MaxRetries: &none}, apiRequest{}, nil)
+		_, err := callDecision(context.Background(), systemOne{}, DecisionSettings{AccessToken: "k", URL: srv.URL, MaxRetries: &none}, soRequest{}, nil)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -273,7 +274,7 @@ func TestRetryBudgetFromTheProfile(t *testing.T) {
 		srv := serve(&calls)
 		defer srv.Close()
 		four := 4
-		_, _ = callDecision(context.Background(), DecisionSettings{AccessToken: "k", URL: srv.URL, MaxRetries: &four}, apiRequest{}, nil)
+		_, _ = callDecision(context.Background(), systemOne{}, DecisionSettings{AccessToken: "k", URL: srv.URL, MaxRetries: &four}, soRequest{}, nil)
 		if calls != 5 {
 			t.Fatalf("calls = %d, want 5 (one call plus 4 retries)", calls)
 		}

@@ -59,7 +59,7 @@ func TestEvidenceReachesTheServiceEndToEnd(t *testing.T) {
 
 	// ---- what the designer configured in the drawer -------------------------
 	cfg := DecisionSettings{URL: srv.URL, Model: "jev-latest"}
-	if err := validateSettings(cfg); err != nil {
+	if err := validateSettings(systemOne{}, cfg); err != nil {
 		t.Fatalf("profile: %v", err)
 	}
 	evidenceRows := []EvidenceItem{
@@ -88,7 +88,7 @@ func TestEvidenceReachesTheServiceEndToEnd(t *testing.T) {
 			Options:      []Option{{Name: "low", Description: "routine"}, {Name: "high", Description: "contested"}},
 		},
 	}
-	if err := validateQuestions(questions); err != nil {
+	if err := validateQuestions(questions, localMaxScoreLevels); err != nil {
 		t.Fatalf("questions: %v", err)
 	}
 
@@ -98,7 +98,8 @@ func TestEvidenceReachesTheServiceEndToEnd(t *testing.T) {
 		"customer": res("{{$.ticket.customer}}"),
 		"problem":  "Early contract termination",
 	}, evidence)
-	resp, err := callDecision(context.Background(), cfg, buildRequest(res, cfg, state, questions), nil)
+	resp, err := callDecision(context.Background(), systemOne{}, cfg,
+		systemOne{}.buildRequest(res, modelOf(systemOne{}, cfg), state, questions), nil)
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}

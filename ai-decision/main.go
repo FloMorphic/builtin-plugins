@@ -1,9 +1,10 @@
-// Command ai-decision is the Inflow "AI Decision" plugin node: a System One
-// decision model (TypeSafe's hosted Jev, or a local Laya — both serve the same
-// POST /v1/systemone protocol, and which one answers is a property of the
-// settings profile). The binary is a thin bind layer: it builds an SDK plugin
-// from the local .env.morph, registers the node's action (see package
-// decisionnode), starts serving, and blocks.
+// Command ai-decision is the Inflow "AI Decision" plugin node: a decision model
+// reached over either decision protocol — POST /v1/systemone (TypeSafe's Jev, Laya,
+// Ollama's nimble) or POST /v1/decisions (OpenAI's Decisions API and gateways
+// implementing its shape) — which one is a property of the settings profile.
+// The binary is a thin bind layer: it builds an SDK plugin from the local
+// .env.morph, registers the node's action (see package decisionnode), starts
+// serving, and blocks.
 package main
 
 import (
@@ -22,7 +23,7 @@ func main() {
 	p.Intro(sdkv1.PluginIntro{
 		Name:    "AI Decision",
 		Author:  "inflow Dev. Team",
-		Version: "v0.1.0",
+		Version: "v0.2.0",
 	})
 
 	decisionnode.Register(p)

@@ -1,34 +1,56 @@
 // Package decisionnode implements the Inflow "AI Decision" plugin node: a
 // single `run` action that evaluates a block of state — plus any evidence the
-// designer injects — against a set of typed questions on a System One decision
-// model, and routes the flow by the answers.
+// designer injects — against a set of typed questions on a decision model, and
+// routes the flow by the answers.
 //
-// The node speaks one protocol, POST /v1/systemone, and two models serve it:
-// TypeSafe's hosted Jev, and Laya, the open local-first System One model. Their
-// request and reply shapes are the same, so which one answers is a property of
-// the settings profile (see DecisionSettings and validateSettings), not of the
-// node — which is why the node is named for what it does rather than for one
-// vendor.
+// The node speaks TWO wire protocols, because the decision-model space settled
+// into two rather than one, and `settings.provider` picks which (see dialect.go):
 //
-// A System One model is a decider, not a reasoner: it takes state plus
-// questions whose valid answers are declared up front, and returns a calibrated
-// probability over every declared answer — never free text, never an answer
-// that was not listed. That is the same contract the LLM node enforces at the
-// runtime layer with bound functions (each function is an outbound port; the
-// model can only pick one of them), so this node maps onto the canvas the same
-// way — the declared answers ARE the ports — with the judgment swapped for a
-// distribution.
+//   - "systemone" (the default) — POST /v1/systemone: TypeSafe's hosted Jev,
+//     Laya, OpenJev, and Ollama's local deciders (nimble, tev1).
+//   - "decisions" — POST /v1/decisions: OpenAI's Decisions API (gpt-6-luna) and
+//     any gateway implementing its shape; Vercel's AI Gateway does, and serves
+//     Jev over it as well — which is why the setting names the PROTOCOL rather
+//     than a vendor.
+//
+// Everything below the dialect is one implementation: the typed questions, the
+// declared options, the "<question>.<option>" port tags, the confidence floor
+// and the `_exception` branch. So which SERVICE answers and which PROTOCOL it
+// speaks are both properties of the settings profile, not of the node, and a
+// flow can be re-pointed from a local Nimble to hosted Jev to gpt-6-luna by
+// swapping the profile with its canvas wiring untouched. That is why the node is
+// named for what it does rather than for one vendor.
+//
+// The dialect interface is the whole protocol-dependent surface — the endpoint,
+// the defaults, the score ceiling, the request body, the reply decoding and the
+// retryable statuses. Adding a third protocol is another implementation of it
+// plus a case in dialectOf, the same shape the LLM node's provider.go has for
+// the same reason.
+//
+// A decision model is a decider, not a reasoner: it takes state plus questions
+// whose valid answers are declared up front, and returns a probability over
+// every declared answer — never free text, never an answer that was not listed.
+// That is the same contract the LLM node enforces at the runtime layer with
+// bound functions (each function is an outbound port; the model can only pick
+// one of them), so this node maps onto the canvas the same way — the declared
+// answers ARE the ports — with the judgment swapped for a distribution.
+//
+// One semantic exists on only one protocol: the Decisions API may REFUSE a
+// single question while answering the rest. A refused question has no answer
+// and so no port, so a routed one leaves through `_exception` with code
+// `refused` (see runHandler).
 //
 // The node exposes ONE action, `run`. Every request body arrives as the SDK
 // envelope { "_registry": {...}, "body": {...} }, and `body` (see RunBody) has
 // four parts:
 //
 //   - settings  : the *settings-profile* the frontend ships per request — the
-//     endpoint, the API key, the model id, a timeout and the retry budget. Its
-//     shape is DecisionSettings. Only 429 and 529 are retried, waiting for
-//     Retry-After when the service sends it; max_retries is a pointer so an
-//     explicit 0 ("decide once") differs from an absent field ("take the
-//     default").
+//     protocol, the endpoint, the API key, the model id, a timeout and the
+//     retry budget. Its shape is DecisionSettings. Which statuses are retried
+//     is the protocol's own (429/529 for System One; 429 and any 5xx for the
+//     Decisions API), waiting for Retry-After when the service sends it;
+//     max_retries is a pointer so an explicit 0 ("decide once") differs from an
+//     absent field ("take the default").
 //
 //   - state     : the subject to decide on — the case, the ticket, the message.
 //     A text template that may embed {{$.a.b}} variables resolved against the
