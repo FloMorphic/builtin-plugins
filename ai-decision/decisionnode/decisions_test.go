@@ -28,6 +28,8 @@ func TestDialectOf(t *testing.T) {
 		{"  SystemOne  ", providerSystemOne},
 		{"jev", providerSystemOne},
 		{"nimble", providerSystemOne},
+		{"microsoft", providerSystemOne},
+		{"foundry", providerSystemOne},
 		{"laya", providerSystemOne},
 		{"decisions", providerDecisions},
 		{"openai", providerDecisions},

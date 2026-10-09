@@ -80,12 +80,23 @@ var (
 func dialectOf(cfg DecisionSettings) (dialect, error) {
 	switch strings.ToLower(strings.TrimSpace(cfg.Provider)) {
 	case "", providerSystemOne, "system-one", "system_one", "system one",
-		"jev", "typesafe", "laya", "openjev", "nimble", "tev", "ollama":
+		"jev", "typesafe", "laya", "openjev", "nimble", "tev", "ollama",
+		// Microsoft Foundry serves Microsoft's own decision models over System
+		// One verbatim — Microsoft-Decision-1 is a post-trained Qwen3.5-9B, the
+		// same base family as Ollama's nimble, announced 2026-10-09 at
+		// commandline.microsoft.com/microsoft-decision-1-model-foundry. Its
+		// route sits at the resource root, not under the `/openai/v1` base its
+		// chat models use, so a Foundry profile is an ordinary System One
+		// profile whose `url` carries that prefix (see the README). Bare
+		// "azure" is deliberately NOT an alias: the same resource also fronts
+		// OpenAI models, which answer the other protocol, so the name alone
+		// does not pick a shape.
+		"microsoft", "foundry", "azure-foundry", "mai", "decision-1":
 		return systemOne{}, nil
 	case providerDecisions, "decision", "openai-decisions", "openai_decisions",
 		"openai", "gpt", "luna", "vercel", "ai-gateway", "gateway":
 		return decisions{}, nil
 	}
-	return nil, fmt.Errorf("unsupported settings.provider %q (expected %q — TypeSafe Jev, Laya, OpenJev, Ollama nimble — or %q — OpenAI's Decisions API and gateways implementing it)",
+	return nil, fmt.Errorf("unsupported settings.provider %q (expected %q — TypeSafe Jev, Laya, OpenJev, Ollama nimble, Microsoft Foundry — or %q — OpenAI's Decisions API and gateways implementing it)",
 		cfg.Provider, providerSystemOne, providerDecisions)
 }

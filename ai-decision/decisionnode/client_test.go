@@ -321,3 +321,89 @@ func TestRetryAfterAndWait(t *testing.T) {
 		t.Fatalf("backoff must be capped = %v", got)
 	}
 }
+
+// Microsoft-Decision-1 on Microsoft Foundry needs no dialect of its own:
+// Foundry serves Microsoft's decision models over System One verbatim — `state`,
+// a `questions` map, `answers` keyed by question id — so the only thing that
+// differs from TypeSafe is where the route sits.
+//
+// It is NOT under the OpenAI-compatible `/openai/v1` base the chat models use;
+// it hangs off the resource root at `/providers/microsoft/v1/systemone`. Since
+// baseURL + dialect.path() is a plain join, a profile reaches it by carrying the
+// `/providers/microsoft` prefix in `url` — which is the whole of the support,
+// and the thing worth pinning so a future change to either half keeps it
+// reachable.
+//
+// `model` is the DEPLOYMENT name, not the catalog id (Azure reserves
+// "Microsoft-Decision-1", so a deployment is named something like "decision-1"),
+// and the reply reports the catalog id back. The reply below is the shape a live
+// GlobalStandard deployment returned on 2026-10-09.
+func TestSystemOneReachesMicrosoftFoundry(t *testing.T) {
+	const resource = "/providers/microsoft"
+	var got soRequest
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if r.Header.Get("Authorization") != "Bearer foundry-key" {
+			t.Errorf("auth header = %q", r.Header.Get("Authorization"))
+		}
+		if err := sonic.ConfigDefault.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"microsoft-decision-1","answers":{
+			"defect":{"type":"noul","noul":0.982013764002278},
+			"severity":{"type":"choice","choice":"high","confidence":0.9866142978108987,"probabilities":{"high":0.9933071489054494,"low":0.006692851094550702}},
+			"confidence":{"type":"score","score":0.8175744673038222,"confidence":0.6351489346076444,"legend":{"0":"unsure","1":"sure"},"probabilities":{"0":0.1824255326961778,"1":0.8175744673038222}}
+		},"usage":{"input_tokens":87,"output_tokens":3}}`))
+	}))
+	defer srv.Close()
+
+	cfg := DecisionSettings{
+		// provider left empty on purpose: System One is the default, and a
+		// Foundry profile is an ordinary System One profile.
+		AccessToken: "foundry-key",
+		URL:         srv.URL + resource,
+		Model:       "decision-1",
+	}
+	if err := validateSettings(systemOne{}, cfg); err != nil {
+		t.Fatalf("validateSettings: %v", err)
+	}
+	qs := []Question{
+		{ID: "defect", Type: typeNoul, Instructions: "Is this a defect?"},
+		{ID: "severity", Type: typeChoice, Instructions: "How severe is it?",
+			Options: []Option{{Name: "low", Description: "cosmetic"}, {Name: "high", Description: "blocks users"}}},
+		{ID: "confidence", Type: typeScore, Instructions: "How sure are you?",
+			Options: []Option{{Name: "unsure"}, {Name: "sure"}}},
+	}
+	resp, err := callDecision(context.Background(), systemOne{}, cfg,
+		systemOne{}.buildRequest(identity, modelOf(systemOne{}, cfg), "The export job hangs at 99%", qs), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if want := resource + systemOnePath; gotPath != want {
+		t.Errorf("path = %q, want %q", gotPath, want)
+	}
+	if got.Model != "decision-1" {
+		t.Errorf("model = %q, want the deployment name %q", got.Model, "decision-1")
+	}
+	if got.State != "The export job hangs at 99%" {
+		t.Errorf("state = %q", got.State)
+	}
+	if got.Questions["severity"].Type != typeChoice || got.Questions["defect"].Type != typeNoul {
+		t.Errorf("questions = %+v", got.Questions)
+	}
+	if resp.Model != "microsoft-decision-1" {
+		t.Errorf("reply model = %q", resp.Model)
+	}
+	if a := resp.Answers["severity"]; a.Choice != "high" || a.Probabilities["high"] != 0.9933071489054494 {
+		t.Errorf("severity = %+v", a)
+	}
+	if a := resp.Answers["defect"]; a.P == nil || *a.P != 0.982013764002278 {
+		t.Errorf("defect = %+v", a)
+	}
+	if a := resp.Answers["confidence"]; a.Score == nil || *a.Score != 0.8175744673038222 || a.Probabilities["1"] != 0.8175744673038222 {
+		t.Errorf("confidence = %+v", a)
+	}
+}

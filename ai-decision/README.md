@@ -9,7 +9,7 @@ speaks both. Which one it uses is `settings.provider`:
 
 | `provider` | Endpoint | Serves |
 | ---------- | -------- | ------ |
-| `systemone` *(default)* | `POST /v1/systemone` | [Jev](https://docs.typesafe.ai/concepts/system-one) (TypeSafe, hosted), [Laya](https://github.com/receptron/laya) (Convai, local), [OpenJev](https://github.com/razorback16/openjev), and Ollama's local deciders — [`nimble`](https://ollama.com/library/nimble:9b-q8_0) (Qwen3.5-9B), `tev1` |
+| `systemone` *(default)* | `POST /v1/systemone` | [Jev](https://docs.typesafe.ai/concepts/system-one) (TypeSafe, hosted), **Microsoft-Decision-1** (Microsoft Foundry — see below), [Laya](https://github.com/receptron/laya) (Convai, local), [OpenJev](https://github.com/razorback16/openjev), and Ollama's local deciders — [`nimble`](https://ollama.com/library/nimble:9b-q8_0) (Qwen3.5-9B), `tev1` |
 | `decisions` | `POST /v1/decisions` | [OpenAI's Decisions API](https://developers.openai.com/api/docs/guides/decisions) (`gpt-6-luna`), and gateways implementing its shape — [Vercel's AI Gateway](https://vercel.com/docs/ai-gateway/sdks-and-apis/openai-decisions) does, and routes Jev through it too |
 
 `provider` names the **protocol, not the vendor**, deliberately: each shape
@@ -26,6 +26,58 @@ Within a protocol, the deployment decides what the profile must carry:
 | hosted, first-party — the default | `access_token`; `url` and `model` may stay empty |
 | local / self-hosted (Laya, Nimble) | `url` + `model`; usually no key at all |
 | a gateway or aggregator (`thejevai.com`, Vercel) | its own `access_token` **and** its `url`; `model` is that gateway's slug (`typesafe/jev-1.13`, `openai/gpt-6-luna-decisions`) |
+
+### Microsoft Foundry (Microsoft-Decision-1)
+
+Microsoft's own decision model is a **System One** service, not a third protocol.
+Per [Microsoft's announcement](https://commandline.microsoft.com/microsoft-decision-1-model-foundry/)
+(2026-10-09), `Microsoft-Decision-1` is a post-trained **Qwen3.5-9B** — the same
+base family as Ollama's `nimble` — scoring a fixed set of declared options with
+a calibrated probability each, over a 32,768-token input. Foundry serves it with
+System One's request and reply bodies verbatim (`state`, a `questions` map of
+`noul`/`choice`/`score`, `answers` keyed by question id), so it needs no
+`provider` of its own:
+
+```jsonc
+{
+  "provider": "systemone",                                             // or "microsoft" / "foundry"
+  "url": "https://<resource>.services.ai.azure.com/providers/microsoft",
+  "model": "decision-1",                                               // the DEPLOYMENT name
+  "access_token": "<foundry resource key>"
+}
+```
+
+Two things are easy to get wrong, and both live in the profile:
+
+- **The route is not under `/openai/v1`.** Foundry's chat models sit under
+  `/openai/v1` (and project-scoped bases want an `api-version` this route does
+  not document); the decision route hangs off the **resource root** at
+  `/providers/microsoft/v1/systemone`. Because the node joins `url` +
+  `/v1/systemone`, the profile's `url` carries the `/providers/microsoft`
+  prefix and nothing else — no `/openai/v1`, no `/api/projects/<name>`.
+- **`model` is the deployment name, not the catalog id.** Azure reserves
+  `Microsoft-Decision-1`, so a deployment is named something else
+  (`decision-1`); it answers only to that name and reports the catalog id
+  `microsoft-decision-1` back in the reply.
+
+Foundry enforces the same 2–10 score levels and 2–255 choice options System One
+declares, and bills one token meter ($0.042/Mtok in, output free) — so a flow
+can be pointed at it from hosted Jev by swapping the profile alone.
+
+*Caveat:* the announcement states the protocol family and the model, but **not
+the wire format** — no endpoint path, request body or auth header appears in it,
+and Microsoft has published none elsewhere. The route and body above are what
+the Foundry portal's own Decision playground sends, corroborated by two
+independent client implementations and a live deployment. The node sends the key
+as `Authorization: Bearer`, which that capture shows is accepted; Foundry also
+takes an `api-key` header on other routes, and if a tenant ever rejects the
+bearer form that is the one thing here that would need adding.
+
+Microsoft also says it intends to **rebase the model** on others, MAI and OpenAI
+among them. That changes what answers, not how it is asked: the endpoint is the
+contract here, not the base model, so a rebase is expected to leave this profile
+working. Worth re-checking the reply's `model` field after one, since that is
+where the catalog id would move.
 
 A gateway is a legitimate third option — one key reaching several deciders — but
 it is not the default: a workflow product should not route a customer's state
