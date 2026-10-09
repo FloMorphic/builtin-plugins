@@ -24,11 +24,12 @@ func main() {
 
 	httpnode.Register(p)
 
-	// The plugin's signal port: a stop for a request reaches it through the
-	// node's registry, which filed the request when it was accepted. One handler
-	// per port — compose others with
-	// sdkv1.ChainSignals(httpnode.Stops.OnSignal, ...).
-	p.OnSignal(httpnode.Stops.OnSignal)
+	// The plugin's signal port: one handler, composed — LogSignals prints every
+	// signal the runtime publishes for this plugin as it arrives (this job's and,
+	// since one subject carries them all, other flows' and other replicas'), then
+	// Stops.OnSignal cancels the request a conclusion is about when that conclusion
+	// is a cancellation, logging that cancel itself from inside jobstop.
+	p.OnSignal(sdkv1.ChainSignals(sdkv1.LogSignals("http"), httpnode.Stops.OnSignal))
 
 	if err := p.Start(); err != nil {
 		log.Fatalf("http: start: %v", err)

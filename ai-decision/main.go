@@ -27,7 +27,12 @@ func main() {
 	})
 
 	decisionnode.Register(p)
-	p.OnSignal(decisionnode.Stops.OnSignal)
+	// The plugin's signal port: one handler, composed — LogSignals prints every
+	// signal the runtime publishes for this plugin as it arrives (this job's and,
+	// since one subject carries them all, other flows' and other replicas'), then
+	// Stops.OnSignal cancels the job a conclusion is about when that conclusion is
+	// a cancellation, logging that cancel itself from inside jobstop.
+	p.OnSignal(sdkv1.ChainSignals(sdkv1.LogSignals("ai-decision"), decisionnode.Stops.OnSignal))
 
 	if err := p.Start(); err != nil {
 		log.Fatalf("ai-decision: start: %v", err)

@@ -3,7 +3,7 @@ module github.com/FloMorphic/builtin-plugins/http
 go 1.27
 
 require (
-	github.com/Inflowenger/go-plugin-sdk v0.2.7
+	github.com/Inflowenger/go-plugin-sdk v0.2.8
 	github.com/bytedance/sonic v1.15.4
 )
 
