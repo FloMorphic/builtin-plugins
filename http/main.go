@@ -24,6 +24,12 @@ func main() {
 
 	httpnode.Register(p)
 
+	// The plugin's signal port: a stop for a request reaches it through the
+	// node's registry, which filed the request when it was accepted. One handler
+	// per port — compose others with
+	// sdkv1.ChainSignals(httpnode.Stops.OnSignal, ...).
+	p.OnSignal(httpnode.Stops.OnSignal)
+
 	if err := p.Start(); err != nil {
 		log.Fatalf("http: start: %v", err)
 	}

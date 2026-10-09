@@ -9,6 +9,12 @@ import (
 
 // Register wires the Cast / Mapping node's `run` action onto the plugin. Call it
 // before p.Start().
+//
+// The action is deliberately NOT cancelable (no jobstop.Registry, no signal
+// port). Cancellation is for work that must not outlive the flow — a paid call,
+// an open stream, a held lock — and this node has none: it resolves tokens
+// already in hand and returns, with nothing on the wire and nothing to release.
+// A stop would arrive to find the run finished.
 func Register(p *sdkv1.Plugin) {
 	p.AddAction(sdkv1.Action{
 		Method:         "run",

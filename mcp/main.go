@@ -24,6 +24,11 @@ func main() {
 
 	mcpnode.Register(p)
 
+	// The plugin's signal port: a stop for a run reaches it through the node's
+	// registry, which filed the run when it was accepted. One handler per port —
+	// compose others with sdkv1.ChainSignals(mcpnode.Stops.OnSignal, ...).
+	p.OnSignal(mcpnode.Stops.OnSignal)
+
 	if err := p.Start(); err != nil {
 		log.Fatalf("mcp: start: %v", err)
 	}

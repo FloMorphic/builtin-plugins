@@ -23,6 +23,32 @@ independently, and reads its infra connection from a local `.env.inflow` (see th
 the MCP node carries its own copy of the LLM provider glue so the two stay
 decoupled.
 
+## Stopping with the flow
+
+A job the runtime stops does **not** stop by itself: by design, the SDK lets an
+accepted job run on, because the next run of that node may build on its progress.
+So each node opts in where its work must not outlive the flow — a paid call, an
+open session, a request on the wire — with the SDK's
+[`jobstop`](https://github.com/Inflowenger/go-plugin-sdk/blob/main/jobstop/jobstop.go)
+registry: `Middleware: sdkv1.Use(Stops.Middleware)` on the action, and
+`p.OnSignal(<node>.Stops.OnSignal)` on the plugin's signal port in `main`. The
+handler then takes `job.Context()` and hands it to the work; when a stop lands
+the runtime has already stopped listening, so the handler returns without
+reporting instead of routing a failure nobody will read.
+
+| Plugin | Stops with the flow | What a stop cuts |
+| ------ | ------------------- | ---------------- |
+| `llm` | `run` | the streamed model call, and any retry backoff |
+| `mcp` | `run`, `call_tool` | the MCP session, the model call, the remaining tool calls and turns |
+| `ai-decision` | `run` | the decision call, and any retry wait |
+| `http` | `run` | the request in flight, and any `Retry-After` / backoff wait |
+| `cast` | — | nothing: it resolves tokens already in hand, with nothing on the wire |
+
+The `getToolsList` meta method is not a job and carries its own 20s deadline, so
+it stays plain. Cancellation is matched by `jobId` alone: one subject carries
+every signal of a plugin, so a process also hears other flows' (and other
+replicas') endings and ignores them.
+
 ## Build one
 
 ```sh

@@ -1,20 +1,27 @@
 package decisionnode
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
+	"github.com/Inflowenger/go-plugin-sdk/jobstop"
 	"github.com/Inflowenger/go-plugin-sdk/sdkv1"
 )
 
+// Stops holds the node's runs in flight, filed by jobId as each is accepted, so
+// a stop for one reaches it — see runHandler. Its other half, Stops.OnSignal,
+// belongs on the plugin's signal port, which the binary owns: main registers it.
+var Stops jobstop.Registry
+
 // Register wires the node's `run` action onto the plugin. Call it before
-// p.Start().
+// p.Start(). For a run to stop with its flow, the plugin's signal port must also
+// carry Stops.OnSignal — see main.
 func Register(p *sdkv1.Plugin) {
 	p.AddAction(sdkv1.Action{
 		Method:         "run",
 		Title:          "Run",
 		Description:    "Evaluate the state (and any evidence) against typed questions on a decision model \u2014 System One (hosted Jev, local Laya or Ollama nimble) or the Decisions API (gpt-6-luna), chosen by the settings profile \u2014 and route by the answers",
+		Middleware:     sdkv1.Use(Stops.Middleware),
 		RequestHandler: runHandler,
 	})
 }
@@ -49,7 +56,16 @@ func Exception(job sdkv1.Job, code, reason string, data map[string]any) any {
 }
 
 // runHandler implements the Jev node's single `run` action.
+//
+// A run stops with its flow. A decision is paid for, and once the flow is gone
+// nothing downstream will route on the answer — not even the `_exception` branch
+// — so the action runs through Stops.Middleware, and the job's context is
+// cancelled when the runtime stops this job's process (a user stop, a stop
+// command, the workflow's timeout, the idle window). It aborts the call in
+// flight and any retry wait (see callDecision). Only this job's stop: another
+// flow's run of this node is filed under its own jobId.
 func runHandler(job sdkv1.Job) {
+	ctx := job.Context()
 	req, err := sdkv1.CastRequestTo[RunBody](job.Req.Data)
 	if err != nil {
 		job.DoneWithError(err.Error())
@@ -101,9 +117,16 @@ func runHandler(job sdkv1.Job) {
 		Title:   "thinking",
 		Content: fmt.Sprintf("evaluating %d question(s) on %s", len(questions), model),
 	})
-	resp, err := callDecision(context.Background(), d, cfg, d.buildRequest(res, model, state, questions),
+	resp, err := callDecision(ctx, d, cfg, d.buildRequest(res, model, state, questions),
 		func(msg string) { job.Progress(20, sdkv1.Frame{Title: "waiting", Content: msg}) })
 	if err != nil {
+		if ctx.Err() != nil {
+			// Stopped, not failed: the runtime has concluded this process and
+			// stopped listening, so there is no exception branch left to route
+			// to — and every command sent now would only wait out the SDK's
+			// retries.
+			return
+		}
 		Exception(job, "provider_error", "provider error: "+err.Error(), map[string]any{
 			"model":    model,
 			"provider": d.name(),

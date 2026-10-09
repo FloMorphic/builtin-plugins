@@ -4,17 +4,25 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Inflowenger/go-plugin-sdk/jobstop"
 	"github.com/Inflowenger/go-plugin-sdk/sdkv1"
 	"github.com/bytedance/sonic"
 )
 
+// Stops holds the node's runs in flight, filed by jobId as each is accepted, so
+// a stop for one reaches it — see runHandler. Its other half, Stops.OnSignal,
+// belongs on the plugin's signal port, which the binary owns: main registers it.
+var Stops jobstop.Registry
+
 // Register wires the LLM node's `run` action onto the plugin. Call it before
-// p.Start().
+// p.Start(). For a run to stop with its flow, the plugin's signal port must also
+// carry Stops.OnSignal — see main.
 func Register(p *sdkv1.Plugin) {
 	p.AddAction(sdkv1.Action{
 		Method:         "run",
 		Title:          "Run",
 		Description:    "Run an LLM turn against the node's conversation using a settings-profile",
+		Middleware:     sdkv1.Use(Stops.Middleware),
 		RequestHandler: runHandler,
 	})
 }
@@ -54,7 +62,16 @@ func Exception(job sdkv1.Job, code, reason string, messages []ChatMessage, data 
 }
 
 // runHandler implements the LLM node's single `run` action.
+//
+// A run stops with its flow. A model call is paid for, and once the flow is gone
+// nothing downstream will read its answer — so the action runs through
+// Stops.Middleware, and the job's context is cancelled when the runtime stops this
+// job's process (a user stop, a stop command, the workflow's timeout, the idle
+// window). It aborts the call in flight and any retry backoff (see callModel).
+// Only this job's stop: another flow's run of this node is filed under its own
+// jobId.
 func runHandler(job sdkv1.Job) {
+	ctx := job.Context()
 	req, err := sdkv1.CastRequestTo[RunBody](job.Req.Data)
 	if err != nil {
 		job.DoneWithError(err.Error())
@@ -115,8 +132,14 @@ func runHandler(job sdkv1.Job) {
 	//    provider/API failure (bad key, quota, rate limit, network, no choices) is
 	//    the first exception case: the flow leaves through `_exception` instead of
 	//    stopping at this node.
-	result, err := streamChat(job, cfg, messages, req.Body.Functions)
+	result, err := streamChat(ctx, job, cfg, messages, req.Body.Functions)
 	if err != nil {
+		if ctx.Err() != nil {
+			// Stopped, not failed: the runtime has concluded this process and
+			// stopped listening, so there is no one to route an exception to —
+			// and every command sent now would only wait out the SDK's retries.
+			return
+		}
 		// Nothing came back, so the conversation reported here is the one we sent —
 		// which is exactly what the exception branch needs to see (and what the next
 		// run must read back) to know what the provider was asked.

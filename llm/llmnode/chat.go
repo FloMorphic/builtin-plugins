@@ -47,8 +47,10 @@ func hasSendableTurn(msgs []ChatMessage) bool {
 // the canvas via job.Progress, ramping the percentage but NEVER reaching 100 —
 // the runtime treats 100 as "done". The library accumulates the tool-call deltas
 // for us; we read the finished calls off the first choice.
-func streamChat(job sdkv1.Job, cfg LLMSettings, messages []ChatMessage, functions []BoundFunction) (completion, error) {
-	ctx := context.Background()
+//
+// ctx is the run's lifetime: cancelled when the flow is stopped, it aborts the
+// stream and any retry wait.
+func streamChat(ctx context.Context, job sdkv1.Job, cfg LLMSettings, messages []ChatMessage, functions []BoundFunction) (completion, error) {
 	llm, err := newLLM(ctx, cfg)
 	if err != nil {
 		return completion{}, err

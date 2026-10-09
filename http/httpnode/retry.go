@@ -1,6 +1,7 @@
 package httpnode
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -43,11 +44,17 @@ const (
 )
 
 // send performs the request, retrying when it is both safe and worthwhile.
+//
+// The request's own context bounds the whole sequence, waits included: the node
+// hands it the job's context, so a stopped flow ends the attempt in flight (the
+// transport does that) AND the backoff before the next one, instead of the node
+// sitting out a Retry-After nobody is waiting for any more.
 func send(client *http.Client, request *http.Request, retries int, notify func(string)) (*http.Response, error) {
 	if retries < 0 {
 		retries = 0
 	}
 	idempotent := isIdempotent(request.Method)
+	ctx := request.Context()
 
 	var last error
 	for attempt := 0; ; attempt++ {
@@ -97,7 +104,9 @@ func send(client *http.Client, request *http.Request, retries int, notify func(s
 				notify(fmt.Sprintf("%s — retrying in %s (attempt %d of %d)",
 					response.Status, wait.Round(time.Millisecond), attempt+2, retries+1))
 			}
-			time.Sleep(wait)
+			if err := hold(ctx, wait); err != nil {
+				return nil, err
+			}
 
 		default:
 			last = err
@@ -109,8 +118,25 @@ func send(client *http.Client, request *http.Request, retries int, notify func(s
 				notify(fmt.Sprintf("%s — retrying in %s (attempt %d of %d)",
 					err, wait.Round(time.Millisecond), attempt+2, retries+1))
 			}
-			time.Sleep(wait)
+			if err := hold(ctx, wait); err != nil {
+				return nil, err
+			}
 		}
+	}
+}
+
+// hold waits out the backoff, or gives up the moment the run is stopped. The
+// context's error is returned as the failure, so the caller sees a cancellation
+// rather than the status that was about to be retried — which is what tells the
+// node to wind down quietly instead of reporting.
+func hold(ctx context.Context, wait time.Duration) error {
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

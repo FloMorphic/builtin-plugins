@@ -24,6 +24,11 @@ func main() {
 
 	llmnode.Register(p)
 
+	// The plugin's signal port: a stop for a run reaches it through the node's
+	// registry, which filed the run when it was accepted. One handler per port —
+	// compose others with sdkv1.ChainSignals(llmnode.Stops.OnSignal, ...).
+	p.OnSignal(llmnode.Stops.OnSignal)
+
 	if err := p.Start(); err != nil {
 		log.Fatalf("llm: start: %v", err)
 	}

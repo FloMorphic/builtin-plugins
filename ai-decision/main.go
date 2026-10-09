@@ -27,6 +27,7 @@ func main() {
 	})
 
 	decisionnode.Register(p)
+	p.OnSignal(decisionnode.Stops.OnSignal)
 
 	if err := p.Start(); err != nil {
 		log.Fatalf("ai-decision: start: %v", err)

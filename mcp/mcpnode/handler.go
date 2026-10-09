@@ -7,32 +7,55 @@ import (
 	"time"
 
 	"github.com/FloMorphic/builtin-plugins/mcp/llm"
+	"github.com/Inflowenger/go-plugin-sdk/jobstop"
 	"github.com/Inflowenger/go-plugin-sdk/sdkv1"
 	"github.com/bytedance/sonic"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/tmc/langchaingo/llms"
 )
 
+// Stops holds the node's runs in flight, filed by jobId as each is accepted, so
+// a stop for one reaches it — see stopped. Its other half, Stops.OnSignal,
+// belongs on the plugin's signal port, which the binary owns: main registers it.
+var Stops jobstop.Registry
+
 // Register wires the MCP node's two actions and its meta method onto the plugin.
-// Call it before p.Start().
+// Call it before p.Start(). For a run to stop with its flow, the plugin's signal
+// port must also carry Stops.OnSignal — see main.
 func Register(p *sdkv1.Plugin) {
 	p.AddAction(sdkv1.Action{
 		Method:         "run",
 		Title:          "Run",
 		Description:    "Drive an LLM (from a settings-profile) over an MCP server's tools; the node executes the tool calls",
+		Middleware:     sdkv1.Use(Stops.Middleware),
 		RequestHandler: mcpRunHandler,
 	})
 	p.AddAction(sdkv1.Action{
 		Method:         "call_tool",
 		Title:          "Call Tool",
 		Description:    "Call a single MCP tool with the given arguments; no LLM involved",
+		Middleware:     sdkv1.Use(Stops.Middleware),
 		RequestHandler: mcpCallToolHandler,
 	})
+	// The meta method takes no job and holds nothing open past its own 20s
+	// deadline, so there is nothing for a stop to reach: it stays plain.
 	p.AddMeta(sdkv1.Meta{
 		Method:         "getToolsList",
 		RequestHandler: mcpGetToolsList,
 	})
 }
+
+// stopped reports whether this run's flow has been stopped.
+//
+// Both actions run through Stops.Middleware, so the job's context is cancelled
+// when the runtime stops this job's process (a user stop, a stop command, the
+// workflow's timeout, the idle window) — which aborts the MCP session, the model
+// call in flight and any retry wait. What the context cannot do is keep the
+// handler from reporting afterwards: the runtime has concluded the job and
+// stopped listening, so a Progress, a Done or a DoneWithError sent now would
+// only wait out the SDK's retries. A stopped run returns instead, and does no
+// further paid or external work on the way out.
+func stopped(ctx context.Context) bool { return ctx.Err() != nil }
 
 // ---- run action -----------------------------------------------------------
 
@@ -57,11 +80,14 @@ func mcpRunHandler(job sdkv1.Job) {
 		return
 	}
 
-	ctx := context.Background()
+	ctx := job.Context() // cancelled when the flow is stopped — see stopped
 	job.Progress(5, sdkv1.Frame{Title: "run", Content: "connecting to MCP server"})
 
 	cli, err := newMCPClient(ctx, body.Connection)
 	if err != nil {
+		if stopped(ctx) {
+			return
+		}
 		job.DoneWithError(err.Error())
 		return
 	}
@@ -71,6 +97,9 @@ func mcpRunHandler(job sdkv1.Job) {
 	// Functions list means "bind everything the server offers".
 	serverTools, err := listMCPTools(ctx, cli)
 	if err != nil {
+		if stopped(ctx) {
+			return
+		}
 		job.DoneWithError("list tools failed: " + err.Error())
 		return
 	}
@@ -104,7 +133,17 @@ func mcpRunHandler(job sdkv1.Job) {
 
 	model, err := llm.NewLLM(ctx, cfg)
 	if err != nil {
+		if stopped(ctx) {
+			return
+		}
 		job.DoneWithError(err.Error())
+		return
+	}
+
+	// The MCP session is up, which is the first thing a stop has something to
+	// cut; from here on every runtime round-trip would wait out the SDK's
+	// retries for a job nobody is listening to, so check before the next one.
+	if stopped(ctx) {
 		return
 	}
 
@@ -167,6 +206,9 @@ func mcpRunHandler(job sdkv1.Job) {
 
 	maxTurns := resolveMaxToolTurns(body.MaxToolTurns)
 	for turn := 0; turn < maxTurns; turn++ {
+		if stopped(ctx) {
+			return // a stop between turns: no further turn is paid for
+		}
 		job.Progress(bump(), sdkv1.Frame{
 			Title:   "thinking",
 			Content: fmt.Sprintf("consulting %s (turn %d)", cfg.Model, turn+1),
@@ -194,6 +236,9 @@ func mcpRunHandler(job sdkv1.Job) {
 				job.Progress(bump(), sdkv1.Frame{Title: "retrying", Content: note})
 			})
 		if err != nil {
+			if stopped(ctx) {
+				return
+			}
 			job.DoneWithError(err.Error())
 			return
 		}
@@ -255,6 +300,9 @@ func mcpRunHandler(job sdkv1.Job) {
 		for _, tc := range choice.ToolCalls {
 			if tc.FunctionCall == nil {
 				continue
+			}
+			if stopped(ctx) {
+				return // a stop mid-turn: the remaining tools are not called
 			}
 			name := tc.FunctionCall.Name
 			if refusal, refused := unboundRefusal(allowed, tc.ID, name); refused {
@@ -463,11 +511,14 @@ func mcpCallToolHandler(job sdkv1.Job) {
 		return
 	}
 
-	ctx := context.Background()
+	ctx := job.Context() // cancelled when the flow is stopped — see stopped
 	job.Progress(10, sdkv1.Frame{Title: "call_tool", Content: "connecting to MCP server"})
 
 	cli, err := newMCPClient(ctx, body.Connection)
 	if err != nil {
+		if stopped(ctx) {
+			return
+		}
 		job.DoneWithError(err.Error())
 		return
 	}
@@ -479,6 +530,9 @@ func mcpCallToolHandler(job sdkv1.Job) {
 	callReq.Params.Arguments = body.Arguments
 	res, err := cli.CallTool(ctx, callReq)
 	if err != nil {
+		if stopped(ctx) {
+			return
+		}
 		job.DoneWithError(err.Error())
 		return
 	}

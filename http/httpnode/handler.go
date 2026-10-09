@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Inflowenger/go-plugin-sdk/jobstop"
 	"github.com/Inflowenger/go-plugin-sdk/sdkv1"
 	"github.com/bytedance/sonic"
 )
@@ -19,13 +20,20 @@ const defaultTimeout = 30 * time.Second
 // cannot exhaust memory. 10 MiB is generous for an API payload.
 const maxBodyBytes = 10 << 20
 
+// Stops holds the node's requests in flight, filed by jobId as each is accepted,
+// so a stop for one reaches it — see runHandler. Its other half, Stops.OnSignal,
+// belongs on the plugin's signal port, which the binary owns: main registers it.
+var Stops jobstop.Registry
+
 // Register wires the HTTP node's `run` action onto the plugin. Call it before
-// p.Start().
+// p.Start(). For a request to stop with its flow, the plugin's signal port must
+// also carry Stops.OnSignal — see main.
 func Register(p *sdkv1.Plugin) {
 	p.AddAction(sdkv1.Action{
 		Method:         "run",
 		Title:          "Run",
 		Description:    "Make an HTTP request to a REST API — method, URL, headers, query and body, with connection config (base URL, auth, default headers) from a settings profile. Every string field resolves {{$.a.b}} tokens against the live flow context.",
+		Middleware:     sdkv1.Use(Stops.Middleware),
 		RequestHandler: runHandler,
 	})
 }
@@ -40,7 +48,22 @@ func Register(p *sdkv1.Plugin) {
 // success from this node's point of view: the status is committed under `status`
 // (and `ok` for 2xx) so a downstream Rule node can branch on it, rather than the
 // node needing its own error port.
+//
+// A request stops with its flow. It may be a slow download, a long poll or a
+// retry budget waiting out a Retry-After of a minute, and once the flow is gone
+// nothing downstream will read the response — so the action runs through
+// Stops.Middleware, and the job's context is cancelled when the runtime stops
+// this job's process (a user stop, a stop command, the workflow's timeout, the
+// idle window). It aborts the request in flight and any retry wait (see send).
+// Only this job's stop: another flow's run of this node is filed under its own
+// jobId.
+//
+// What it deliberately does NOT do is unsend a request. A stop that lands while
+// a POST is on the wire cuts the node's side of it; whether the server went
+// ahead and acted is not something this end can know, which is the same caveat
+// retrying carries (see retry.go).
 func runHandler(job sdkv1.Job) {
+	ctx := job.Context()
 	req, err := sdkv1.CastRequestTo[RunBody](job.Req.Data)
 	if err != nil {
 		job.DoneWithError(err.Error())
@@ -90,7 +113,7 @@ func runHandler(job sdkv1.Job) {
 	if hasBody {
 		bodyReader = strings.NewReader(bodyStr)
 	}
-	httpReq, err := http.NewRequest(method, finalURL, bodyReader)
+	httpReq, err := http.NewRequestWithContext(ctx, method, finalURL, bodyReader)
 	if err != nil {
 		job.DoneWithError("build request: " + err.Error())
 		return
@@ -104,6 +127,12 @@ func runHandler(job sdkv1.Job) {
 		job.Progress(60, sdkv1.Frame{Title: "retrying", Content: note})
 	})
 	if err != nil {
+		if ctx.Err() != nil {
+			// Stopped, not failed: the runtime has concluded this process and
+			// stopped listening, so there is nothing to report the failure to —
+			// and every command sent now would only wait out the SDK's retries.
+			return
+		}
 		job.DoneWithError("request failed: " + err.Error())
 		return
 	}
@@ -111,6 +140,9 @@ func runHandler(job sdkv1.Job) {
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
+		if ctx.Err() != nil {
+			return // stopped mid-body: wind down quietly
+		}
 		job.DoneWithError("read response: " + err.Error())
 		return
 	}
