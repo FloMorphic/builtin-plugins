@@ -307,18 +307,23 @@ func FirstJSONValue(arguments string) (string, bool) {
 //
 // before the real fragments begin. That chunk has no type and no arguments, so
 // it satisfies neither half of the merge test and is filed as a SECOND call —
-// one with no name — onto which every later fragment then accumulates. The node
-// is handed the named call holding no arguments and an anonymous call holding
-// the whole argument object: the first routes with nothing to route on, and the
-// second matches no bound function, so a correct single-function answer leaves
-// through `_exception` as unbound_function.
+// one with no name — onto which every later fragment then accumulates. The
+// caller is handed the named call holding no arguments and an anonymous call
+// holding the whole argument object.
+//
+// For the mcp node that means the tool is called with NO arguments and rejected
+// by the server on its schema, while the anonymous half is refused as a tool
+// that is not bound — both answers going back to the model as tool content. So
+// one correct answer costs a turn twice over, and the loop can run out to
+// maxTurns having thrown the model's arguments away without saying so.
 //
 // Exported because the node that reads the stream lives in another package
 // (mcpnode), which applies this before FirstJSONValue.
 //
 // A fragment is identified by having no function name, since a real call always
-// names the function it invokes — that name is what selects the tool, and is
-// this node's outbound-port tag. Each nameless fragment's arguments are
+// names the function it invokes — that name is what selects the tool on the MCP
+// server, and what decides whether it is bound. Each nameless fragment's
+// arguments are
 // appended to the last named call, and its id adopted if the opener had none.
 // A stream whose very first call is nameless is left alone: there is nothing to
 // attach it to, and reporting it unbound is then the honest outcome.
