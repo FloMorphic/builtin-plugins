@@ -146,3 +146,46 @@ func TestParallelToolCallsAreNotMerged(t *testing.T) {
 		}
 	}
 }
+
+// OpenAI's own stream does NOT send the empty-argument opener, so langchaingo
+// accumulates it correctly and there is nothing to rejoin. This pins that the
+// repair is the identity on a well-formed stream: it must not be the case that
+// fixing one provider quietly reshapes every other.
+//
+// The guarantee is structural rather than per-provider — a fragment is
+// recognised by having no function name, and a real call always names the
+// function it invokes, because the name is what selects the tool. So any
+// provider whose calls are well formed passes through unchanged, whether it goes
+// through langchaingo's openai, anthropic or googleai path.
+func TestWellFormedOpenAIStreamIsUntouched(t *testing.T) {
+	deltas := []string{
+		`{"index":0,"id":"call_abc123","type":"function","function":{"name":"dispense_medication","arguments":""}}`,
+		`{"index":0,"function":{"arguments":"{\"drug_name\":"}}`,
+		`{"index":0,"function":{"arguments":" \"Amoxicillin\"}"}}`,
+	}
+	before := generate(t, streamingToolCallServer(t, deltas))
+	if len(before) != 1 {
+		t.Fatalf("langchaingo returned %d calls for a well-formed stream, want 1: %+v", len(before), before)
+	}
+
+	after := coalesceStreamedToolCalls(before)
+	if len(after) != 1 {
+		t.Fatalf("coalescing changed a well-formed stream: %d calls, want 1", len(after))
+	}
+	if after[0].ID != before[0].ID || after[0].FunctionCall.Name != before[0].FunctionCall.Name ||
+		after[0].FunctionCall.Arguments != before[0].FunctionCall.Arguments {
+		t.Errorf("coalescing altered a well-formed call:\n before %+v\n after  %+v",
+			before[0].FunctionCall, after[0].FunctionCall)
+	}
+	if !strings.Contains(after[0].FunctionCall.Arguments, "Amoxicillin") {
+		t.Errorf("arguments = %q", after[0].FunctionCall.Arguments)
+	}
+}
+
+// Nothing in, nothing out — a plain-text turn carries no tool calls, and the
+// repair must not invent one.
+func TestCoalesceOnNoToolCalls(t *testing.T) {
+	if got := coalesceStreamedToolCalls(nil); len(got) != 0 {
+		t.Errorf("got %d calls from nil, want 0", len(got))
+	}
+}
