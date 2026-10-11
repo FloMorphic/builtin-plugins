@@ -244,12 +244,24 @@ func mcpRunHandler(job sdkv1.Job) {
 		}
 		choice := resp.Choices[0]
 
-		// Streamed tool calls can arrive with another call's arguments welded
-		// on, because langchaingo drops the stream index and appends every
-		// fragment to the last call it saw. Left alone, the raw text is recorded
-		// in the assistant turn and sent back on the NEXT request, where the
-		// provider rejects the whole conversation with a 400 — one malformed
-		// call costing the entire run. See llm.FirstJSONValue.
+		// Rejoin a call the stream delivered in fragments, before anything reads
+		// the names off — the name is what selects the tool.
+		//
+		// langchaingo decides which call a fragment belongs to by heuristic, not
+		// by the delta's `index`, and a vLLM-backed endpoint sends an opening
+		// chunk with empty arguments that the heuristic files as a NEW, unnamed
+		// call; every later fragment then lands on that one. Untouched, this node
+		// calls the named half with NO arguments (the server rejects it on its
+		// schema) and refuses the unnamed half as a tool that is not bound — so a
+		// correct single-tool answer costs a turn, twice over, and can run the
+		// loop out to maxTurns. See llm.CoalesceStreamedToolCalls.
+		choice.ToolCalls = llm.CoalesceStreamedToolCalls(choice.ToolCalls)
+
+		// Streamed tool calls can also arrive with another call's arguments
+		// welded on, for the same missing-index reason. Left alone, the raw text
+		// is recorded in the assistant turn and sent back on the NEXT request,
+		// where the provider rejects the whole conversation with a 400 — one
+		// malformed call costing the entire run. See llm.FirstJSONValue.
 		for i := range choice.ToolCalls {
 			if choice.ToolCalls[i].FunctionCall == nil {
 				continue
