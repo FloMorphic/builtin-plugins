@@ -45,8 +45,10 @@ func hasSendableTurn(msgs []ChatMessage) bool {
 // functions are forwarded as llms.Tool, so the model may answer with a tool-call
 // message type instead of (or alongside) text. Every streamed token is pushed to
 // the canvas via job.Progress, ramping the percentage but NEVER reaching 100 —
-// the runtime treats 100 as "done". The library accumulates the tool-call deltas
-// for us; we read the finished calls off the first choice.
+// the runtime treats 100 as "done". The finished calls are read off the first
+// choice, but only after the fragments the library mis-splits are rejoined —
+// its accumulator cannot be relied on across providers (see
+// coalesceStreamedToolCalls and FirstJSONValue).
 //
 // ctx is the run's lifetime: cancelled when the flow is stopped, it aborts the
 // stream and any retry wait.
@@ -106,7 +108,9 @@ func streamChat(ctx context.Context, job sdkv1.Job, cfg LLMSettings, messages []
 	choice := resp.Choices[0]
 
 	out := completion{Content: choice.Content}
-	for _, tc := range choice.ToolCalls {
+	// Rejoin any call the stream delivered as fragments before reading the
+	// names off, because the name is what routes. See coalesceStreamedToolCalls.
+	for _, tc := range coalesceStreamedToolCalls(choice.ToolCalls) {
 		call := toolCall{ID: tc.ID}
 		if tc.FunctionCall != nil {
 			call.Name = tc.FunctionCall.Name

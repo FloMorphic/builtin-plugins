@@ -287,6 +287,62 @@ func FirstJSONValue(arguments string) (string, bool) {
 	return arguments, false
 }
 
+// coalesceStreamedToolCalls rejoins a tool call that arrived as fragments,
+// returning one call per function the model actually invoked.
+//
+// langchaingo decides which call a streamed fragment belongs to by heuristic
+// rather than by the delta's `index` (it has none to read — see
+// FirstJSONValue): updateToolCalls merges a delta into the call before it only
+// when the delta carries an empty `type` AND a non-empty `arguments`, and files
+// anything else as a new call.
+//
+// A vLLM-backed endpoint opens a call the way OpenAI does,
+//
+//	{"index":0,"id":"chatcmpl-tool-…","type":"function",
+//	 "function":{"name":"dispense_medication","arguments":""}}
+//
+// and then sends one more opening chunk with the arguments still empty,
+//
+//	{"index":0,"function":{"arguments":""}}
+//
+// before the real fragments begin. That chunk has no type and no arguments, so
+// it satisfies neither half of the merge test and is filed as a SECOND call —
+// one with no name — onto which every later fragment then accumulates. The node
+// is handed the named call holding no arguments and an anonymous call holding
+// the whole argument object: the first routes with nothing to route on, and the
+// second matches no bound function, so a correct single-function answer leaves
+// through `_exception` as unbound_function.
+//
+// A fragment is identified by having no function name, since a real call always
+// names the function it invokes — that name is what selects the tool, and is
+// this node's outbound-port tag. Each nameless fragment's arguments are
+// appended to the last named call, and its id adopted if the opener had none.
+// A stream whose very first call is nameless is left alone: there is nothing to
+// attach it to, and reporting it unbound is then the honest outcome.
+func coalesceStreamedToolCalls(calls []llms.ToolCall) []llms.ToolCall {
+	out := make([]llms.ToolCall, 0, len(calls))
+	for _, tc := range calls {
+		named := tc.FunctionCall != nil && strings.TrimSpace(tc.FunctionCall.Name) != ""
+		if !named && len(out) > 0 && out[len(out)-1].FunctionCall != nil {
+			// Copy before appending: FunctionCall is a pointer into the
+			// response langchaingo still owns, and the caller re-reads it.
+			prev := out[len(out)-1]
+			merged := *prev.FunctionCall
+			if tc.FunctionCall != nil {
+				merged.Arguments += tc.FunctionCall.Arguments
+			}
+			prev.FunctionCall = &merged
+			if prev.ID == "" {
+				prev.ID = tc.ID
+			}
+			out[len(out)-1] = prev
+			continue
+		}
+		out = append(out, tc)
+	}
+	return out
+}
+
 func oneLine(text string) string {
 	text = strings.TrimSpace(strings.ReplaceAll(text, "\n", " "))
 	const limit = 120
