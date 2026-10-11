@@ -42,10 +42,15 @@
 //     on: the model selected none of them, or called a function that was never
 //     bound.
 //
-// Both go through Exception, which routes out of `_exception` (CmdNextFilter) and
-// then ends the job with DoneWithErrorData — so the node is marked failed while
-// the flow carries on through downstream nodes tagged `_exception`. The failure
-// still reports its state: "error" (the reason), "code" (provider_error /
+// Both go through Exception. When functions are bound — which is exactly when
+// the editor gives the node an `_exception` port — it routes out of `_exception`
+// (CmdNextFilter) and ends the job with Done: the node DELIVERS an exception
+// rather than failing, so the flow carries on through downstream nodes tagged
+// `_exception` even under stop_on_error (a node the core considers failed has
+// every edge pruned, which used to take the exception edge with it). With no
+// functions bound there is no exception port — just one untagged handle — so it
+// reports a plain failure instead and routes nowhere. The exception reports
+// its state: "error" (the reason), "code" (provider_error /
 // no_function_selected / unbound_function — what the branch switches on) and the
 // full "messages" conversation, plus per-case extras. Reporting the conversation
 // is what keeps it on the node's scope, since a terminal payload IS the commit.
