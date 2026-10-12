@@ -30,45 +30,88 @@ func Register(p *sdkv1.Plugin) {
 // exceptionTag is the route tag of the node's exception port.
 const exceptionTag = "_exception"
 
-// Exception ends a run that failed *at the provider boundary* — the API errored,
-// or a function-bound session came back with nothing this node can route on. It
-// does two things, in order:
+// The exception codes, named once so the trait table below, the tests and every
+// call site agree on their spelling — they are the machine-readable tag an
+// exception branch switches on, so a typo in one of them is a branch that never
+// matches.
+const (
+	codeProviderError      = "provider_error"
+	codeNoFunctionSelected = "no_function_selected"
+	codeUnboundFunction    = "unbound_function"
+)
+
+// nodeDelivered reports whether an exception code means the node DID its job.
 //
-//  1. CmdNextFilter([_exception]) — narrow the outbound ports to the exception
-//     tag, so the flow does not die here: only downstream nodes carrying
-//     `_exception` fire next and the process continues down that branch.
-//  2. Done(data) — conclude the job as DELIVERED, carrying the reason under
-//     "error" plus the run's state: `code` (a machine-readable tag the exception
-//     branch can switch on) and the full conversation, so the canvas always
-//     shows what happened and what the messages were, and the next run still
-//     reads the conversation back off the node scope (a terminal payload IS the
-//     node's committed scope — reporting only the reason would drop it).
+// The three codes leave through the same port and are not the same thing, and
+// the difference decides whether the run records an error:
 //
-// Step 2 deliberately does NOT use DoneWithErrorData, and that is the whole
-// reason this comment is long. DoneWithErrorData sets CommandPayload.Error,
-// which is the core's verdict that the node did not deliver — and a run started
-// with stop_on_error prunes every outgoing edge of a node that did not deliver,
-// the `_exception` one included, *after* the routing in step 1 has already
-// selected it. The node then reported an exception and the flow stopped dead at
-// it: the branch the author wired for exactly this case could never fire. Which
-// of the two the node is doing is not a contradiction to resolve — routing out
-// of `_exception` IS this node delivering its answer, and the answer is "I could
-// not get a usable turn out of the provider, take the exception branch". The
-// failure is not lost: it is `code` + "error" in the committed payload, which is
-// what the branch reads and what the canvas shows.
+// The node did not deliver — provider_error (the API errored, or the reply was
+// unreadable, past the retry budget) and unbound_function (the model called a
+// function that was never bound to this node). The second is a wire defect: a
+// model inventing a tool it was not offered is broken, the run's ledger should
+// say so, and stop_on_error SHOULD stop a run at one rather than carry on from a
+// turn nothing can act on.
 //
-// Both of the above apply only when the node HAS an exception port, and that is
-// what `functions` decides. This node's ports are not generated from anything
-// the plugin publishes — being a builtin, its ports are hardcoded in the editor,
+// The node delivered — no_function_selected. The model answered; it just
+// answered with prose instead of a tool call. That is an ordinary thing for a
+// model to do and the designer drew the exception branch for precisely it, so
+// routing out of `_exception` IS this node delivering its answer. Nothing is
+// lost: `code`, `error` and the full conversation are in the committed payload,
+// which is what the branch reads and what the canvas shows.
+//
+// An unrecognised code is treated as a failure, which is the safer way round: a
+// new exception case over-reports rather than silently passing a defect off as a
+// decision.
+//
+// The ai-decision node sorts its five codes by the same question, for the same
+// reason — see its nodeDelivered.
+func nodeDelivered(code string) bool {
+	switch code {
+	case codeNoFunctionSelected:
+		return true
+	case codeProviderError, codeUnboundFunction:
+		return false
+	}
+	return false
+}
+
+// Exception ends a run that left through the node's exception port — the API
+// errored, or a function-bound session came back with nothing this node can route
+// on.
+//
+// It narrows the outbound ports to the exception tag with CmdNextFilter, so the
+// flow does not die here: only downstream nodes carrying `_exception` fire next
+// and the process continues down that branch. How it then CONCLUDES depends on
+// whether the node delivered — see nodeDelivered, which is the whole of that
+// decision.
+//
+// For a delivered exception it is Done, and NOT DoneWithErrorData, which is the
+// whole reason this comment is long. DoneWithErrorData sets
+// CommandPayload.Error, the core's verdict that the node did not deliver — and a
+// run started with stop_on_error prunes every outgoing edge of such a node, the
+// `_exception` one included, *after* the routing above has already selected it.
+// The node then reported an exception and the flow stopped dead at it: the branch
+// the author wired for exactly this case could never fire.
+//
+// For one that did NOT deliver it is DoneWithErrorData, and the cut is the point:
+// the failure belongs in the run's ledger, the node renders red, and a run asked
+// to stop at errors stops at a model calling a function nobody bound. Only a
+// plain-text turn is the node delivering an answer; a broken turn is not, and the
+// earlier version of this function treated all three alike, so neither of those
+// could stop a run any more.
+//
+// Both apply only when the node HAS an exception port, and that is what
+// `functions` decides. This node's ports are not generated from anything the
+// plugin publishes — being a builtin, its ports are hardcoded in the editor,
 // which appends the exception port only once functions are bound (nodeCatalog's
 // llm `ports`: `if (fns.length === 0) return []`). Unbound, the node keeps one
 // untagged handle that already takes every outcome and there is no `_exception`
 // to route to — so filtering onto that tag there would prune the only edge the
-// node has and end the branch in silence. Such a node therefore keeps reporting
-// a real failure: the reason is recorded, and stop_on_error cuts the default
-// edge, which is what stopping on an error means when the author declared no
-// handler. provider_error is the case that reaches both, since it fires before
-// any function is looked at.
+// node has and end the branch in silence. Such a node therefore keeps reporting a
+// real failure whatever the code says: the reason is recorded, and stop_on_error
+// cuts the default edge, which is what stopping on an error means when the author
+// declared no handler. provider_error is the case that reaches both, since it
+// fires before any function is looked at.
 //
 // Config mistakes (unreadable request body, an incomplete settings-profile, a
 // prompt template with nothing to send) are NOT exceptions: they fail with a
@@ -82,7 +125,10 @@ func Exception(job sdkv1.Job, code, reason string, messages []ChatMessage, funct
 		return job.DoneWithErrorData(reason, payload)
 	}
 	job.CmdNextFilter([]string{exceptionTag})
-	return job.Done(payload)
+	if nodeDelivered(code) {
+		return job.Done(payload)
+	}
+	return job.DoneWithErrorData(reason, payload)
 }
 
 // exceptionRoutes reports whether this node has an `_exception` port for an
@@ -194,7 +240,7 @@ func runHandler(job sdkv1.Job) {
 		// Nothing came back, so the conversation reported here is the one we sent —
 		// which is exactly what the exception branch needs to see (and what the next
 		// run must read back) to know what the provider was asked.
-		Exception(job, "provider_error", "provider error: "+err.Error(), messages, req.Body.Functions, map[string]any{
+		Exception(job, codeProviderError, "provider error: "+err.Error(), messages, req.Body.Functions, map[string]any{
 			"resumed":  resumed,
 			"provider": cfg.Provider,
 			"model":    cfg.Model,
@@ -229,7 +275,7 @@ func runHandler(job sdkv1.Job) {
 		}
 
 		if len(result.ToolCalls) == 0 {
-			Exception(job, "no_function_selected", "bound functions were offered but the model selected none", messages, req.Body.Functions, map[string]any{
+			Exception(job, codeNoFunctionSelected, "bound functions were offered but the model selected none", messages, req.Body.Functions, map[string]any{
 				"resumed": resumed,
 				"bound":   bound,
 				"content": result.Content, // what it answered with instead — often empty
@@ -237,7 +283,7 @@ func runHandler(job sdkv1.Job) {
 			return
 		}
 		if unknown := unboundCalls(result.ToolCalls, req.Body.Functions); len(unknown) > 0 {
-			Exception(job, "unbound_function", "model called function(s) not bound to this node: "+strings.Join(unknown, ", "), messages, req.Body.Functions, map[string]any{
+			Exception(job, codeUnboundFunction, "model called function(s) not bound to this node: "+strings.Join(unknown, ", "), messages, req.Body.Functions, map[string]any{
 				"resumed":    resumed,
 				"bound":      bound,
 				"unbound":    unknown,

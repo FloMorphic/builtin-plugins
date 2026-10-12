@@ -2,11 +2,13 @@ package llmnode
 
 import "testing"
 
-// An exception is DELIVERED, not failed: Exception ends the job with Done, so
-// the payload built here is the whole record of the failure. Nothing else
-// carries it — there is no CommandPayload.Error any more, because a node the
-// core considers failed has every outgoing edge pruned under stop_on_error,
-// `_exception` included, which is the one edge the exception exists to take.
+// The payload is the whole record of an exception, whichever way the job ends.
+// It has to be, for a DELIVERED one: that concludes with Done, which has no
+// error field — and it concludes that way because a node the core considers
+// failed has every outgoing edge pruned under stop_on_error, `_exception`
+// included, which is the one edge the exception exists to take. A failed one
+// repeats the reason on the terminal command, but the branch still reads it from
+// here.
 func TestExceptionPayloadCarriesTheWholeFailure(t *testing.T) {
 	msgs := []ChatMessage{{Role: "user", Content: "R/ Amoxicillin"}}
 	got := exceptionPayload("unbound_function", "model called function(s) not bound to this node: ",
@@ -51,8 +53,9 @@ func TestExceptionRoutesOnlyWhenTheNodeHasAnExceptionPort(t *testing.T) {
 	if len(bound) == 0 {
 		t.Fatal("precondition")
 	}
-	// Routable: functions bound ⇒ the port exists ⇒ the node must DELIVER, so
-	// stop_on_error does not prune the edge the exception is routing onto.
+	// Routable: functions bound ⇒ the port exists ⇒ the exception may route onto
+	// it. Whether it then concludes Done or DoneWithErrorData is a separate
+	// question, and the one nodeDelivered answers.
 	if !exceptionRoutes(bound) {
 		t.Error("functions are bound, so the exception must route out of _exception")
 	}
@@ -64,5 +67,51 @@ func TestExceptionRoutesOnlyWhenTheNodeHasAnExceptionPort(t *testing.T) {
 	}
 	if exceptionRoutes([]BoundFunction{}) {
 		t.Error("an empty function list is the same as none")
+	}
+}
+
+// The trait table, pinned. The three codes leave through the same port and are
+// not the same thing, and getting one on the wrong side has consequences nothing
+// else catches: a defect filed as a decision stops being able to stop a run, and
+// a decision filed as a defect has its own branch pruned out from under it under
+// stop_on_error — which is the bug the exception routing was fixed for in the
+// first place.
+func TestExceptionCodesSplitByWhetherTheNodeDelivered(t *testing.T) {
+	for _, tc := range []struct {
+		code      string
+		delivered bool
+		why       string
+	}{
+		{codeProviderError, false, "the API errored past the retry budget — the node has no turn to offer"},
+		{codeUnboundFunction, false, "the model invented a tool nobody bound: a defect, and stop_on_error should stop at it"},
+		{codeNoFunctionSelected, true, "the model answered with prose instead of a tool call — an ordinary turn, and the branch was drawn for it"},
+	} {
+		if got := nodeDelivered(tc.code); got != tc.delivered {
+			t.Errorf("nodeDelivered(%q) = %v, want %v — %s", tc.code, got, tc.delivered, tc.why)
+		}
+	}
+}
+
+// An unrecognised code reports a failure: a new exception case over-reports
+// rather than silently passing a defect off as a decision.
+func TestAnUnknownExceptionCodeIsTreatedAsAFailure(t *testing.T) {
+	if nodeDelivered("something_new") {
+		t.Error("an unknown code was treated as a delivered turn")
+	}
+}
+
+// The codes are the machine-readable tag an exception branch switches on, so
+// their spelling is contract. A rename here is a branch that silently stops
+// matching in every flow already drawn against it.
+func TestExceptionCodeSpellings(t *testing.T) {
+	for _, tc := range []struct{ got, want string }{
+		{codeProviderError, "provider_error"},
+		{codeNoFunctionSelected, "no_function_selected"},
+		{codeUnboundFunction, "unbound_function"},
+		{exceptionTag, "_exception"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("code is %q, want %q — flows already route on this string", tc.got, tc.want)
+		}
 	}
 }

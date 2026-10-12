@@ -35,25 +35,44 @@
 // ⇒ no CmdNextFilter ⇒ the flow follows its default route.
 //
 // Exception routing: the node also has an implicit `_exception` port, used for
-// the two failures that happen at the provider boundary —
+// the failures that happen at the provider boundary. All of them go through
+// Exception, which narrows the outbound ports onto the tag with CmdNextFilter so
+// the flow carries on through downstream nodes tagged `_exception` instead of
+// dying here. How the job ENDS depends on whether the node delivered — see
+// nodeDelivered:
 //
-//   - the provider/API errors (bad key, quota, rate limit, network, no choices);
-//   - functions were bound to the session but the turn carries no port to route
-//     on: the model selected none of them, or called a function that was never
-//     bound.
+// The node did not deliver. It ends with DoneWithErrorData, so the failure is in
+// the run's ledger, the node renders red, and stop_on_error still ends the run
+// there — which at a defect is what that setting is for:
 //
-// Both go through Exception. When functions are bound — which is exactly when
-// the editor gives the node an `_exception` port — it routes out of `_exception`
-// (CmdNextFilter) and ends the job with Done: the node DELIVERS an exception
-// rather than failing, so the flow carries on through downstream nodes tagged
-// `_exception` even under stop_on_error (a node the core considers failed has
-// every edge pruned, which used to take the exception edge with it). With no
-// functions bound there is no exception port — just one untagged handle — so it
-// reports a plain failure instead and routes nowhere. The exception reports
-// its state: "error" (the reason), "code" (provider_error /
-// no_function_selected / unbound_function — what the branch switches on) and the
-// full "messages" conversation, plus per-case extras. Reporting the conversation
-// is what keeps it on the node's scope, since a terminal payload IS the commit.
+//   - provider_error   : the provider/API errored (bad key, quota, rate limit,
+//     network, no choices) past the retry budget;
+//   - unbound_function : the model called a function that was never bound to this
+//     node. A model inventing a tool it was not offered is broken, and carrying
+//     on from a turn nothing can act on is worse than stopping.
+//
+// The node delivered, and the answer is to take the exception branch. It ends
+// with Done, because a node the core considers failed has EVERY edge pruned
+// under stop_on_error — the `_exception` one included, after the routing has
+// already selected it — so the branch the author drew for this case could never
+// fire:
+//
+//   - no_function_selected : functions were bound but the model answered with
+//     prose instead of a tool call. That is an ordinary thing for a model to do,
+//     and the exception branch is drawn for precisely it.
+//
+// All of it applies only when functions are bound, which is exactly when the
+// editor gives the node an `_exception` port. With none bound there is no
+// exception port — just one untagged handle that already takes every outcome —
+// so an exception reports a plain failure and routes nowhere, whatever its code:
+// stop_on_error then cuts the default edge, which is what stopping on an error
+// means when the author declared no handler.
+//
+// Every exception reports its state either way: "error" (the reason), "code"
+// (provider_error / no_function_selected / unbound_function — what the branch
+// switches on) and the full "messages" conversation, plus per-case extras.
+// Reporting the conversation is what keeps it on the node's scope, since a
+// terminal payload IS the commit.
 //
 // Config mistakes (unreadable body, incomplete settings-profile, nothing
 // sendable) are not exceptions: they fail with a plain DoneWithError and no
