@@ -384,17 +384,37 @@ node to `decisions`.
 
 ### Exception port
 
-The node also has the implicit `_exception` port. It fires (then the job ends
-with `DoneWithErrorData`, so the node is marked failed while the flow continues
-down that branch) for, reported as `code`:
+The node also has the implicit `_exception` port. It is narrowed onto with
+`CmdNextFilter`, so the flow continues down that branch instead of dying here.
 
-| `code` | When |
-| ------ | ---- |
-| `provider_error` | the API call failed: bad key, validation (422), rate limit / overload past the retry budget, network |
-| `no_answer` | the reply has no answer for a routed question |
-| `refused` | the model declined a routed question (`decisions` only — see Routing) |
-| `unbound_option` | an answer names an option that was not declared (defensive) |
-| `low_confidence` | a routed question set `min_confidence` and its top answer's confidence fell below it |
+How the job then **ends** depends on whether the node delivered, because the five
+cases are two different things:
+
+| `code` | When | Ends with | Node |
+| ------ | ---- | --------- | ---- |
+| `provider_error` | the API call failed: bad key, validation (422), rate limit / overload past the retry budget, network | `DoneWithErrorData` | red |
+| `no_answer` | the reply has no answer for a routed question | `DoneWithErrorData` | red |
+| `unbound_option` | an answer names an option that was not declared (defensive) | `DoneWithErrorData` | red |
+| `refused` | the model declined a routed question (`decisions` only — see Routing) | `Done` | ok |
+| `low_confidence` | a routed question set `min_confidence` and its top answer's confidence fell below it | `Done` | ok |
+
+The first three are failures: the node did not deliver, so the error is in the
+run's ledger and `stop_on_error` still stops the run — which at a wire defect is
+what that setting is for. A decider answering outside its declared contract is
+broken, and routing on a decision nobody made is worse than stopping.
+
+The last two are decisions. `refused` is the Decisions API using its own facility
+for declining a question; `low_confidence` is the floor you set in the drawer
+doing exactly what you set it to do. The node worked, so it concludes `Done` and
+`code` + `error` ride in the committed payload for the branch to read. Reporting
+them as failures made `min_confidence` defeat itself: a node that did not deliver
+has **every** edge pruned under `stop_on_error`, so the node made the decision it
+was configured to make and the branch drawn for that purpose was cut for it.
+
+All of this needs the node to HAVE an exception port, which it does exactly when
+at least one question routes. A data-only node — every question `route: false` —
+keeps one untagged handle instead, and an exception there is reported without
+routing, since filtering onto a tag no port carries would prune its only edge.
 
 The threshold is optional. The full distribution is always in the output, so
 the policy can instead live in a rule node after this one, where it is visible

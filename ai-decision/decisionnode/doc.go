@@ -113,20 +113,41 @@
 // in one of the declared options — so a "none of these" case must be drawn by
 // the designer as an option (e.g. "other"), which is then just another port.
 //
-// Exception routing: the node also has an implicit `_exception` port, fired
-// (CmdNextFilter) before ending the job with DoneWithErrorData, so the node is
-// marked failed while the flow carries on through downstream nodes tagged
-// `_exception`. The cases, each reported as `code`:
+// Exception routing: the node also has an implicit `_exception` port, narrowed
+// onto with CmdNextFilter so the flow carries on through downstream nodes tagged
+// `_exception` instead of dying here. The five cases are two different things,
+// and that decides how the job ENDS — see nodeDelivered:
+//
+// The node did not deliver. It ends with DoneWithErrorData, so the failure is in
+// the run's ledger, the node renders red, and stop_on_error still stops the run
+// — which at a defect is what that setting is for:
 //
 //   - provider_error   : the API call failed (bad key, validation, rate limit,
 //     overload after retries, network, unreadable reply);
 //   - no_answer        : the reply carries no answer for a routed question;
 //   - unbound_option   : an answer names an option that was not declared
-//     (defensive — the model's output layer should make this impossible);
+//     (defensive — the model's output layer should make this impossible).
+//
+// The node delivered, and the decision is to take the exception branch. It ends
+// with Done, because routing out of `_exception` IS the answer here; `code` and
+// `error` ride in the committed payload for the branch to read:
+//
+//   - refused          : the Decisions API declined one question while answering
+//     the rest (that protocol only — System One cannot decline);
 //   - low_confidence   : a routed question set `min_confidence` and its top
 //     answer's confidence fell below it. The threshold is optional (0 = off);
 //     the full distribution is always in the output, so a rule node after this
 //     one can apply its own policy instead.
+//
+// Reporting those last two as failures made min_confidence defeat itself: a node
+// that did not deliver has every edge pruned under stop_on_error, so the node
+// made exactly the decision it was configured to make and the branch drawn for
+// that purpose was cut for it.
+//
+// All of it applies only when the node HAS an exception port, which it does
+// exactly when at least one question routes (see exceptionRoutes). A data-only
+// node — every question `route: false` — keeps one untagged handle instead, and
+// an exception there is reported without routing.
 //
 // Config mistakes (unreadable body, a missing key on the hosted endpoint, a
 // missing model on a custom one, a question with no id or a bad option count, an

@@ -29,28 +29,136 @@ func Register(p *sdkv1.Plugin) {
 // exceptionTag is the route tag of the node's exception port.
 const exceptionTag = "_exception"
 
-// Exception ends a run that failed *at the decision boundary* — the API errored,
-// a routed question came back unanswered or with an undeclared option, or its
-// confidence fell below the floor the designer set. It does two things, in
-// order:
+// The exception codes, named once so the trait table below, the tests and every
+// call site agree on their spelling — they are the machine-readable tag an
+// exception branch switches on, so a typo in one of them is a branch that never
+// matches.
+const (
+	codeProviderError = "provider_error"
+	codeNoAnswer      = "no_answer"
+	codeUnboundOption = "unbound_option"
+	codeRefused       = "refused"
+	codeLowConfidence = "low_confidence"
+)
+
+// nodeDelivered reports whether an exception code means the node DID its job.
 //
-//  1. CmdNextFilter([_exception]) — narrow the outbound ports to the exception
-//     tag, so the flow does not die here: only downstream nodes carrying
-//     `_exception` fire next and the process continues down that branch.
-//  2. DoneWithErrorData(reason, data) — conclude the job as failed, with the
-//     reason under "error" plus the run's state: `code` (a machine-readable tag
-//     the exception branch can switch on) and whatever answers were decided, so
-//     the canvas shows what Jev said even when the node did not route on it.
+// The five codes leave through the same port and are two different things, and
+// the difference decides whether the run records an error:
+//
+// The node did not deliver — provider_error (the service failed past the retry
+// budget), no_answer (a routed question came back missing) and unbound_option (an
+// answer naming something the question never declared). The last two are wire
+// defects: a decider that answers outside its contract is broken, and a run with
+// stop_on_error on SHOULD stop at one rather than route on a decision nobody
+// made. These keep reporting a failure.
+//
+// The node delivered — refused (the Decisions API's own facility for declining
+// one question while answering the rest) and low_confidence (the floor the
+// designer set in the drawer, doing exactly what they set it to do). Here the
+// node worked: it evaluated the state and concluded that the exception branch is
+// where the flow goes. Reporting those as failures made min_confidence defeat
+// itself, because fractal prunes every edge of a node that did not deliver when
+// stop_on_error is on — the node made the decision it was configured to make and
+// the branch drawn for that purpose was cut for it.
+//
+// An unrecognised code is treated as a failure. A new exception case is a new
+// way for this node to not deliver until somebody decides otherwise, and that is
+// the safer way round: it over-reports rather than silently passing a defect off
+// as a decision.
+func nodeDelivered(code string) bool {
+	switch code {
+	case codeRefused, codeLowConfidence:
+		return true
+	case codeProviderError, codeNoAnswer, codeUnboundOption:
+		return false
+	}
+	return false
+}
+
+// exceptionRoutes reports whether this node has an `_exception` port for an
+// exception to leave through, which is true exactly when at least one question
+// routes.
+//
+// The node's ports are not generated from anything the plugin publishes — being
+// a builtin, they are hardcoded in the editor, which derives a port per option of
+// every ROUTED question and appends the exception port only once there is at
+// least one (nodeCatalog's ai-decision `ports`: `if (out.length === 0) return
+// []`). A node whose every question has `route: false` is a data-only decision:
+// it scores the state onto the scope and branches on nothing, so it keeps one
+// untagged handle that already takes every outcome, and filtering onto the
+// exception tag there would prune the only edge it has.
+//
+// Four of the five codes are raised inside `if q.routes()`, so a routed question
+// exists by construction and this is always true for them. Only provider_error
+// fires before any question is looked at, which makes it the one that can reach a
+// data-only node.
+func exceptionRoutes(questions []Question) bool {
+	for _, q := range questions {
+		if q.routes() {
+			return true
+		}
+	}
+	return false
+}
+
+// exceptionPayload is what an exception commits onto the node's scope: the
+// machine-readable `code` the exception branch switches on, the `error` reason
+// for a reader, and whatever per-case extras the caller adds.
+//
+// `error` is written last so the reason always wins over a caller's key of the
+// same name. It has to be IN the payload, not only on the terminal command's
+// error field: a delivered exception concludes with Done, which has no error
+// field, and the branch still has to be able to read why it was taken.
+func exceptionPayload(code, reason string, data map[string]any) map[string]any {
+	payload := make(map[string]any, len(data)+2)
+	payload["code"] = code
+	for k, v := range data {
+		payload[k] = v
+	}
+	payload["error"] = reason
+	return payload
+}
+
+// Exception ends a run that left through the node's exception port — the API
+// errored, a routed question came back unanswered or with an undeclared option,
+// the model declined it, or its confidence fell below the floor the designer set.
+//
+// It narrows the outbound ports to the exception tag with CmdNextFilter, so the
+// flow does not die here: only downstream nodes carrying `_exception` fire next
+// and the process continues down that branch. How it then CONCLUDES depends on
+// whether the node delivered — see nodeDelivered, which is the whole of that
+// decision:
+//
+//   - it did not: DoneWithErrorData(reason, payload). The failure is in the run's
+//     ledger, the node renders red, and stop_on_error still stops the run at a
+//     defect, which is what that setting is for.
+//   - it did: Done(payload). Routing out of `_exception` IS this node delivering
+//     its answer, and the answer is "take the exception branch". Nothing is lost:
+//     `code` and `error` are in the committed payload, which is what the branch
+//     reads and what the canvas shows.
+//
+// Both carry the answers decided so far, so the canvas shows what the model said
+// even when the node did not route on it.
+//
+// Both also apply only when the node HAS an exception port — see exceptionRoutes.
+// Without one the failure is reported and routes nowhere, because filtering onto
+// a tag no port carries would prune the node's only edge and end the branch in
+// silence.
 //
 // Config mistakes (unreadable request body, a missing API key, malformed
 // questions, an empty state) are NOT exceptions: they fail with a plain
-// DoneWithError and no routing, because there is nothing for a runtime branch
-// to recover from.
-func Exception(job sdkv1.Job, code, reason string, data map[string]any) any {
+// DoneWithError and no routing, because there is nothing for a runtime branch to
+// recover from.
+func Exception(job sdkv1.Job, code, reason string, questions []Question, data map[string]any) any {
+	payload := exceptionPayload(code, reason, data)
+	if !exceptionRoutes(questions) {
+		// No exception port exists on this node — see above.
+		return job.DoneWithErrorData(reason, payload)
+	}
 	job.CmdNextFilter([]string{exceptionTag})
-	payload := map[string]any{"code": code}
-	for k, v := range data {
-		payload[k] = v
+	if nodeDelivered(code) {
+		return job.Done(payload)
 	}
 	return job.DoneWithErrorData(reason, payload)
 }
@@ -127,7 +235,7 @@ func runHandler(job sdkv1.Job) {
 			// retries.
 			return
 		}
-		Exception(job, "provider_error", "provider error: "+err.Error(), map[string]any{
+		Exception(job, codeProviderError, "provider error: "+err.Error(), questions, map[string]any{
 			"model":    model,
 			"provider": d.name(),
 		})
@@ -151,7 +259,7 @@ func runHandler(job sdkv1.Job) {
 		a, ok := resp.Answers[q.ID]
 		if !ok {
 			if q.routes() {
-				Exception(job, "no_answer", fmt.Sprintf("no answer for routed question %q", q.ID), map[string]any{
+				Exception(job, codeNoAnswer, fmt.Sprintf("no answer for routed question %q", q.ID), questions, map[string]any{
 					"model":    model,
 					"provider": d.name(),
 					"question": q.ID,
@@ -169,7 +277,7 @@ func runHandler(job sdkv1.Job) {
 		if a.Refused {
 			refused = append(refused, q.ID)
 			if q.routes() {
-				Exception(job, "refused", fmt.Sprintf("the model declined to answer routed question %q", q.ID), map[string]any{
+				Exception(job, codeRefused, fmt.Sprintf("the model declined to answer routed question %q", q.ID), questions, map[string]any{
 					"model":    model,
 					"provider": d.name(),
 					"question": q.ID,
@@ -183,7 +291,7 @@ func runHandler(job sdkv1.Job) {
 		dec, err := decide(q, a)
 		if err != nil {
 			if q.routes() {
-				Exception(job, "unbound_option", err.Error(), map[string]any{
+				Exception(job, codeUnboundOption, err.Error(), questions, map[string]any{
 					"model":    model,
 					"provider": d.name(),
 					"question": q.ID,
@@ -213,9 +321,9 @@ func runHandler(job sdkv1.Job) {
 	//    confident questions' ports and silently dropping the rest, would hide a
 	//    branch the designer explicitly drew.
 	if len(uncertain) > 0 {
-		Exception(job, "low_confidence",
+		Exception(job, codeLowConfidence,
 			"confidence below the floor for question(s): "+strings.Join(uncertain, ", "),
-			map[string]any{
+			questions, map[string]any{
 				"model":        model,
 				"provider":     d.name(),
 				"uncertain":    uncertain,
